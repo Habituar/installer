@@ -7,12 +7,18 @@
       powershell -ExecutionPolicy Bypass -File installer\build.ps1 -Version 1.0.0
       powershell -ExecutionPolicy Bypass -File installer\build.ps1 -Version 1.0.0 -SemPostgres   (sem PostgreSQL)
 
+  -Version é a ÚNICA fonte da versão (obrigatória, formato X.Y.Z): vai para o versao.json do backend (lido pelo
+  /health, pelo verAplic dos eventos e pelo diagnóstico), para o "version" do package.json empacotado e para o
+  AppVersion do instalador. Não há versão digitada em nenhum outro lugar.
+
   Antes da primeira vez: node installer\tools\gerar-chaves-licenca.mjs (gera installer\license-public.pem).
   Precisa ser Windows porque módulos nativos baixam binários específicos da plataforma;
   o que for empacotado é o que roda no cliente.
 #>
 param(
-  [string]$Version        = "1.0.0",
+  [Parameter(Mandatory = $true)]
+  [ValidatePattern('^\d+\.\d+\.\d+$')]
+  [string]$Version,
   [string]$BackendDir     = "efinanceira-back",
   [string]$FrontendDir    = "efinanceira-front",
   [string]$LicensePublicKey = "",   # PEM da chave PUBLICA (padrao: installer\license-public.pem) — so para conferir config\global-defaults.env
@@ -120,7 +126,7 @@ try {
   $pkg = Get-Content package.json -Raw | ConvertFrom-Json
 
   # Versão instalada, para o /health e o pacote de diagnóstico (src/lib/versao.ts): a do instalador + o commit
-  $commit = (& git rev-parse --short HEAD 2>$null)
+  $commit = (& git rev-parse HEAD 2>$null)
   if ($LASTEXITCODE -ne 0 -or -not $commit) { $commit = 'sem-git' }
   elseif (& git status --porcelain 2>$null) { $commit = "$commit-modificado"; Write-Warning 'Backend com alterações não commitadas: o instalador fica marcado como "-modificado".' }
   $versaoJson = [ordered]@{ versao = $Version; commit = "$commit"; geradoEm = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
@@ -133,12 +139,17 @@ try {
 
   Copy-Item dist "$Stage\backend\dist" -Recurse
   Copy-Item package.json, package-lock.json "$Stage\backend"
-  Set-Content -Path "$Stage\backend\versao.json" -Value $versaoJson -Encoding UTF8
+  # UTF-8 SEM BOM: o Set-Content -Encoding UTF8 do PowerShell 5.1 grava BOM, o JSON.parse do backend recusava o
+  # arquivo e a versão caía para a do package.json ("1.0.0" na tela)
+  [IO.File]::WriteAllText("$Stage\backend\versao.json", $versaoJson, (New-Object Text.UTF8Encoding $false))
   Set-Content -Path "$Stage\backend\entry.txt" -Value $entry -Encoding ASCII
 } finally { Pop-Location }
 
 Push-Location "$Stage\backend"
 try {
+  # "version" do package.json (e do lock) empacotado = a do instalador, para não ficar defasado (o repositório não é
+  # alterado; o versao.json continua tendo prioridade em src/lib/versao.ts)
+  Invoke-Checked npm @('version', $Version, '--no-git-tag-version', '--allow-same-version')
   # Só dependências de produção; as opcionais (mssql, oracledb) são mantidas
   Invoke-Checked npm @('ci', '--omit=dev')
 } finally { Pop-Location }
