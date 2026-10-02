@@ -1,0 +1,13 @@
+deps/
+stage/
+output/
+node-tmp/
+license-private.pem
+# Nunca versionar: chaves privadas de licença, certificados, segredos de instalação e binários gerados
+*.exe
+*.pfx
+*.p12
+license-private*.pem
+chaves-licenca/
+backend.env
+*.log
