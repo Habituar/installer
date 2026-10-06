@@ -2,9 +2,10 @@
   Executado pelo instalador depois que os arquivos foram copiados.
   Instalação nova : (opcional) instala PostgreSQL, cria banco/usuário, gera segredos, cria as tabelas,
                     cria o Cliente (CNPJ) + administrador, registra e sobe o serviço.
-  Atualização     : (config\backend.env já existe) só troca o serviço; o backend aplica as migrations
-                    novas sozinho ao iniciar.
+  Atualização     : (config\backend.env já existe) atualiza o serviço existente no lugar (sem recriá-lo) e
+                    reaplica a configuração de boot; o backend aplica as migrations novas sozinho ao iniciar.
   Log: <app>\logs\install.log
+  Falha: <app>\logs\install-erro.txt — linha útil do erro + etapa, mostrada na tela de falha do instalador.
 #>
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
@@ -23,6 +24,38 @@ $BackendDir = Join-Path $App 'backend'
 $SvcName    = 'efinanceira-api'
 $PgSvc      = 'efinanceira-pg'
 $PgPort     = 5433   # fora da 5432 para não colidir com outro PostgreSQL da máquina
+
+# ------------------------------------------------------------------ resumo do erro para a tela do instalador
+# Antes a falha só dizia "a configuração final falhou (código 1), veja o log". Agora o catch grava em
+# logs\install-erro.txt a linha útil do erro (da saída do último comando externo que falhou — o setup em Node, por
+# exemplo — ou da exceção) e a etapa em andamento; o efinanceira.iss mostra isso. O arquivo de uma execução anterior é
+# apagado aqui, para nunca exibir um erro velho.
+$ErroFile = Join-Path $LogDir 'install-erro.txt'
+if (Test-Path $ErroFile) { Remove-Item $ErroFile -Force }
+$script:Etapa = 'Preparação'
+$script:SaidaDaFalha = $null   # saída do último Invoke-Captured com código <> 0 (zerada quando um comando dá certo)
+
+function Get-LinhaUtilDeErro {
+  param([string]$Saida, [string]$Mensagem)
+  $linhas = @(("$Saida" -split "`r?`n") | ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and $_ -notmatch '^at\s' -and $_ -notmatch '^[\]\[{}(),]+$' })
+  # 1º a migration que falhou (TypeORM); 2º a linha "XxxError: ..."; 3º qualquer linha com cara de erro; 4º a última
+  $linha = $linhas | Where-Object { $_ -match 'Migration\s.+\sfailed' } | Select-Object -Last 1
+  if (-not $linha) { $linha = $linhas | Where-Object { $_ -match '^[A-Za-z]*Error:\s' } | Select-Object -Last 1 }
+  if (-not $linha) { $linha = $linhas | Where-Object { $_ -match '(?i)(error|erro|falh|failed|fatal|exception|inv[aá]lid)' } | Select-Object -Last 1 }
+  if (-not $linha) { $linha = $linhas | Select-Object -Last 1 }
+  if (-not $linha) { $linha = "$Mensagem".Trim() }
+  # Nunca leva senha para a tela: senha/password/pwd/secret = valor
+  $linha = $linha -replace '(?i)\b(password|senha|pwd|secret)(\s*["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s;,]+)', '$1$2***'
+  if ($linha.Length -gt 300) { $linha = $linha.Substring(0, 297) + '...' }
+  return $linha
+}
+
+function Write-ErroInstalacao {
+  param([string]$Linha)
+  # UTF-8 com BOM (Out-File do PS 5.1): o Utf8Decode do efinanceira.iss pula o BOM
+  @($Linha, "Etapa: $script:Etapa") | Out-File -FilePath $ErroFile -Encoding utf8
+}
 
 function Invoke-Checked {
   param([string]$Exe, [string[]]$ArgList)
@@ -89,8 +122,11 @@ function Invoke-Captured {
   $ErrorActionPreference = 'Continue'
   try { $out = (& $Exe @ArgList 2>&1 | ForEach-Object { "$_" }) -join "`r`n" }
   finally { $ErrorActionPreference = $prevEap }
+  $codigo = $LASTEXITCODE
   if ($out) { Write-Host $out }
-  [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $out }
+  # Para o resumo do erro (install-erro.txt): só a saída do comando que falhou; um que dá certo limpa a anterior
+  $script:SaidaDaFalha = if ($codigo -ne 0) { $out } else { $null }
+  [pscustomobject]@{ ExitCode = $codigo; Output = $out }
 }
 
 # Lê config\global-defaults.env (valores globais fixos, públicos) e devolve as linhas KEY=VALUE, na
@@ -116,6 +152,286 @@ function Wait-Port {
   return $false
 }
 
+# ------------------------------------------------------------------ robustez do serviço no boot
+# Sem isto o serviço subia em Automático puro, antes do banco local (SQL Server e SQL Browser vêm em
+# Automático-Atraso), falhava 3 vezes e o SCM desistia. Aplicado via sc.exe nos dois fluxos (instalação
+# nova e atualização): o WinSW 2.x só grava essas opções no "install" e não tem "refresh".
+$SvcResetSec    = 86400
+$SvcFailActions = 'restart/30000/restart/60000/restart/120000'   # a última ação se repete até o reset
+
+function Test-HostLocal {
+  param([string]$HostName)
+  $h = $HostName.Trim().ToLowerInvariant()
+  if ($h -in @('localhost', '.', '(local)', '::1') -or $h -like '127.*') { return $true }
+  $nomes = @($env:COMPUTERNAME.ToLowerInvariant())
+  try { $nomes += [Net.Dns]::GetHostEntry('').HostName.ToLowerInvariant() } catch {}
+  if ($h -in $nomes) { return $true }
+  $ips = @(Get-NetIPAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress.Split('%')[0].ToLowerInvariant() })
+  return ($h -in $ips)
+}
+
+# Serviço (processo próprio) dono da porta TCP em escuta, subindo até 3 níveis na árvore de processos
+# (PostgreSQL: quem escuta é o postgres.exe, filho do pg_ctl.exe que é o processo do serviço).
+function Get-ServicoDaPorta {
+  param([int]$Port)
+  $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+  if (-not $conns) { return $null }
+  $porPid = @{}
+  Get-CimInstance Win32_Service -Filter "ProcessId <> 0 AND ServiceType = 'Own Process'" |
+    ForEach-Object { $porPid[[int]$_.ProcessId] = $_ }
+  foreach ($c in $conns) {
+    $procId = [int]$c.OwningProcess
+    for ($i = 0; $i -lt 3 -and $procId -gt 4; $i++) {
+      if ($porPid.ContainsKey($procId)) { return $porPid[$procId] }
+      $p = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction SilentlyContinue
+      if (-not $p) { break }
+      $procId = [int]$p.ParentProcessId
+    }
+  }
+  return $null
+}
+
+# PostgreSQL parado (porta sem dono): procura entre os serviços pg_ctl o que usa essa porta no postgresql.conf.
+function Get-ServicoPostgresPorConfig {
+  param([int]$Port)
+  $achados = @()
+  foreach ($s in @(Get-CimInstance Win32_Service | Where-Object { $_.PathName -match 'pg_ctl(\.exe)?' })) {
+    $porta = 5432
+    if ($s.PathName -match '-D\s+"([^"]+)"|-D\s+(\S+)') {
+      $conf = Join-Path ($(if ($Matches[1]) { $Matches[1] } else { $Matches[2] })) 'postgresql.conf'
+      if (Test-Path $conf) {
+        $linha = Get-Content $conf | Where-Object { $_ -match '^\s*port\s*=\s*(\d+)' } | Select-Object -Last 1
+        if ($linha -match '^\s*port\s*=\s*(\d+)') { $porta = [int]$Matches[1] }
+      }
+    }
+    if ($porta -eq $Port) { $achados += $s }
+  }
+  if ($achados.Count -eq 1) { return $achados[0] }
+  return $null
+}
+
+# Serviços do Windows dos quais o efinanceira-api deve depender: só quando o banco está NESTA máquina.
+# Remoto, não encontrado ou desabilitado = nenhuma dependência (o motivo vai para este log).
+function Get-DependenciasBanco {
+  param([string]$DbType, [string]$DbHost, [string]$DbPort, [string]$DbName)
+  $candidatos = @()   # pares nome/motivo
+  if (-not $DbHost) { Write-Host 'Dependência do banco: DB_HOST vazio — nenhuma dependência definida.'; return @() }
+
+  $servidor = ($DbHost -split ',')[0].Trim()   # "servidor,porta" (sintaxe do SQL Server)
+  $instancia = ''
+  if (($DbType -eq 'mssql') -and ($servidor -match '^([^\\]+)\\(.+)$')) { $servidor = $Matches[1]; $instancia = $Matches[2] }
+  $porta = 0; [void][int]::TryParse("$DbPort", [ref]$porta)
+
+  if (-not (Test-HostLocal $servidor)) {
+    Write-Host "Dependência do banco: servidor '$servidor' é remoto — nenhuma dependência de serviço definida (só vale para banco nesta máquina)."
+    return @()
+  }
+
+  switch ($DbType) {
+    'mssql' {
+      if ($instancia) {
+        $nome = if ($instancia -ieq 'MSSQLSERVER') { 'MSSQLSERVER' } else { 'MSSQL$' + $instancia }
+        $candidatos += , @($nome, "instância '$instancia' do SQL Server local")
+        if ($instancia -ine 'MSSQLSERVER') {
+          # Instância nomeada sem porta fixa: o driver descobre a porta pelo SQL Browser (UDP 1434)
+          $candidatos += , @('SQLBrowser', "resolve a porta da instância nomeada '$instancia'")
+        }
+      } else {
+        if ($porta -le 0) { $porta = 1433 }
+        $s = Get-ServicoDaPorta $porta
+        if ($s -and $s.Name -like 'MSSQL*') { $candidatos += , @($s.Name, "dono da porta $porta") }
+        else { $candidatos += , @('MSSQLSERVER', "instância padrão do SQL Server (porta $porta sem dono identificado)") }
+      }
+    }
+    'postgres' {
+      if ($porta -le 0) { $porta = 5432 }
+      $s = Get-ServicoDaPorta $porta
+      if (-not $s) { $s = Get-ServicoPostgresPorConfig $porta }
+      if ($s) { $candidatos += , @($s.Name, "PostgreSQL local na porta $porta") }
+      else { Write-Host "Dependência do banco: nenhum serviço do PostgreSQL encontrado para a porta $porta — dependência não definida." }
+    }
+    'oracle' {
+      if ($porta -le 0) { $porta = 1521 }
+      $s = Get-ServicoDaPorta $porta
+      if ($s) { $candidatos += , @($s.Name, "listener do Oracle na porta $porta") }
+      else { Write-Host "Dependência do banco: nenhum serviço escutando na porta $porta (listener do Oracle) — listener fora da dependência." }
+      $inst = @(Get-CimInstance Win32_Service | Where-Object { $_.Name -like 'OracleService*' })
+      if ($inst.Count -gt 1 -and $DbName) {
+        # Mais de uma instância: aceita só se o service name começar pelo SID (ex.: ORCL -> ORCLPDB1)
+        $inst = @($inst | Where-Object { $DbName -like ($_.Name.Substring('OracleService'.Length) + '*') })
+      }
+      if ($inst.Count -eq 1) { $candidatos += , @($inst[0].Name, 'instância do Oracle local') }
+      elseif ($inst.Count -eq 0) { Write-Host 'Dependência do banco: nenhum serviço OracleService* correspondente — instância fora da dependência.' }
+      else { Write-Host "Dependência do banco: mais de uma instância Oracle possível ($(($inst | ForEach-Object Name) -join ', ')) — instância fora da dependência." }
+    }
+  }
+
+  $deps = @()
+  foreach ($c in $candidatos) {
+    $svc = Get-CimInstance Win32_Service -Filter "Name = '$($c[0])'" -ErrorAction SilentlyContinue
+    if (-not $svc) { Write-Host "Dependência do banco: serviço '$($c[0])' ($($c[1])) não existe nesta máquina — não definida." }
+    elseif ($svc.StartMode -eq 'Disabled') { Write-Host "Dependência do banco: serviço '$($c[0])' ($($c[1])) está Desabilitado — não definida (impediria a API de subir)." }
+    else { Write-Host "Dependência do banco: '$($c[0])' ($($c[1]))."; $deps += $svc.Name }
+  }
+  return $deps
+}
+
+# Dependências lidas/gravadas direto na API do SCM (QueryServiceConfigW / ChangeServiceConfigW), com a lista
+# como array — sem montar linha de comando ("sc config depend=" digitado no cmd gravou aspas literais e o
+# serviço caiu no erro 1075). Gravar só o DependOnService do registro não serve: o SCM só relê no boot.
+# Grupos de ordem de carga vêm com o prefixo '+' (SC_GROUP_IDENTIFIER), como no sc.exe.
+if (-not ('EfinSvcDeps' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class EfinSvcDeps {
+  const uint SC_MANAGER_CONNECT = 0x1, SERVICE_QUERY_CONFIG = 0x1, SERVICE_CHANGE_CONFIG = 0x2, SERVICE_NO_CHANGE = 0xFFFFFFFF;
+
+  [DllImport("advapi32.dll", EntryPoint = "OpenSCManagerW", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr OpenSCManager(string machine, string database, uint access);
+  [DllImport("advapi32.dll", EntryPoint = "OpenServiceW", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr OpenService(IntPtr scm, string name, uint access);
+  [DllImport("advapi32.dll", EntryPoint = "ChangeServiceConfigW", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool ChangeServiceConfig(IntPtr svc, uint type, uint start, uint errorControl, string binPath,
+    string loadOrderGroup, IntPtr tagId, string dependencies, string startName, string password, string displayName);
+  [DllImport("advapi32.dll", EntryPoint = "QueryServiceConfigW", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool QueryServiceConfig(IntPtr svc, IntPtr buffer, int size, out int needed);
+  [DllImport("advapi32.dll", SetLastError = true)]
+  static extern bool CloseServiceHandle(IntPtr h);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct QUERY_SERVICE_CONFIG {
+    public uint ServiceType, StartType, ErrorControl;
+    public IntPtr BinaryPathName, LoadOrderGroup;
+    public uint TagId;
+    public IntPtr Dependencies, ServiceStartName, DisplayName;
+  }
+
+  static IntPtr Abrir(string name, uint access, out IntPtr scm) {
+    scm = OpenSCManager(null, null, SC_MANAGER_CONNECT);
+    if (scm == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenSCManager");
+    IntPtr svc = OpenService(scm, name, access);
+    if (svc == IntPtr.Zero) { int e = Marshal.GetLastWin32Error(); CloseServiceHandle(scm); throw new Win32Exception(e, "OpenService " + name); }
+    return svc;
+  }
+
+  // Dependências exatamente como o SCM as tem agora (é o que o "sc qc" mostra)
+  public static string[] Get(string name) {
+    IntPtr scm, svc = Abrir(name, SERVICE_QUERY_CONFIG, out scm);
+    IntPtr buf = IntPtr.Zero;
+    try {
+      int needed;
+      QueryServiceConfig(svc, IntPtr.Zero, 0, out needed);
+      buf = Marshal.AllocHGlobal(needed);
+      if (!QueryServiceConfig(svc, buf, needed, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error(), "QueryServiceConfig");
+      var cfg = (QUERY_SERVICE_CONFIG)Marshal.PtrToStructure(buf, typeof(QUERY_SERVICE_CONFIG));
+      var lista = new List<string>();
+      IntPtr p = cfg.Dependencies;
+      while (p != IntPtr.Zero) {   // REG_MULTI_SZ: strings terminadas em \0, lista terminada em \0\0
+        string s = Marshal.PtrToStringUni(p);
+        if (string.IsNullOrEmpty(s)) break;
+        lista.Add(s);
+        p = new IntPtr(p.ToInt64() + (s.Length + 1) * 2);
+      }
+      return lista.ToArray();
+    } finally {
+      if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+      CloseServiceHandle(svc); CloseServiceHandle(scm);
+    }
+  }
+
+  // Substitui a lista inteira; vazia = sem dependências. Nada além das dependências é alterado.
+  public static void Set(string name, string[] deps) {
+    foreach (string d in deps)
+      if (string.IsNullOrEmpty(d) || d.IndexOf('\0') >= 0 || d.IndexOf('/') >= 0) throw new ArgumentException("Nome de dependência inválido: <" + d + ">");
+    string multi = deps.Length == 0 ? "" : string.Join("\0", deps) + "\0";   // o marshaller põe o \0 final
+    IntPtr scm, svc = Abrir(name, SERVICE_CHANGE_CONFIG, out scm);
+    try {
+      if (!ChangeServiceConfig(svc, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, null, null, IntPtr.Zero, multi, null, null, null))
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "ChangeServiceConfig");
+    } finally { CloseServiceHandle(svc); CloseServiceHandle(scm); }
+  }
+}
+'@
+}
+
+# Uma dependência só é aceita se existir com o nome EXATO (Get-Service aceita curinga e nome de exibição — por isso
+# a comparação) e não estiver Desabilitada (o serviço não subiria). Grupo ('+Nome'): precisa estar no ServiceGroupOrder.
+function Test-DependenciaValida {
+  param([string]$Nome)
+  if ($Nome -like '+*') {
+    $grupos = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ServiceGroupOrder' -ErrorAction SilentlyContinue).List
+    if ($grupos -contains $Nome.Substring(1)) { return '' }
+    return 'grupo de serviços inexistente'
+  }
+  $s = $null
+  try { $s = Get-Service -Name $Nome -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $Nome } } catch {}   # ex.: '[' = curinga inválido
+  if (-not $s) { return 'serviço inexistente' }
+  if ($s.StartType -eq 'Disabled') { return 'serviço Desabilitado' }
+  return ''
+}
+
+# Grava (atuais válidas + banco), confere no SCM e no "sc qc"; se algo não bater, remove TODAS as dependências:
+# sem dependência o serviço sempre consegue iniciar (o restart do SCM cobre o banco atrasado).
+function Set-DependenciasServico {
+  param([string]$Name, [string[]]$DepsBanco)
+  $atuais = @([EfinSvcDeps]::Get($Name))
+  $desejadas = @()
+  foreach ($d in @($atuais) + @($DepsBanco)) {
+    if ([string]::IsNullOrWhiteSpace($d)) { continue }
+    if ($desejadas | Where-Object { $_ -ieq $d }) { continue }
+    $motivo = Test-DependenciaValida $d
+    if ($motivo) { Write-Host "Dependência <$d> removida: $motivo (com ela o serviço não inicia — erro 1075/1068)." }
+    else { $desejadas += $d }
+  }
+  $antes = if ($atuais) { ($atuais | ForEach-Object { "<$_>" }) -join ' ' } else { 'nenhuma' }
+  $depois = if ($desejadas) { ($desejadas | ForEach-Object { "<$_>" }) -join ' ' } else { 'nenhuma' }
+  if (($atuais -join "`n") -ceq ($desejadas -join "`n")) { Write-Host "Dependências do serviço mantidas: $depois" }
+  else {
+    Write-Host "Dependências do serviço: $depois (antes: $antes)"
+    [EfinSvcDeps]::Set($Name, [string[]]$desejadas)
+  }
+
+  # Conferência: o que o SCM devolve tem de ser exatamente o gravado, cada nome válido e presente no "sc qc"
+  $gravadas = @([EfinSvcDeps]::Get($Name))
+  $qc = (& (Join-Path $env:SystemRoot 'System32\sc.exe') qc $Name | Out-String)
+  $falha = ''
+  if (($gravadas -join "`n") -cne ($desejadas -join "`n")) { $falha = "SCM devolveu <$($gravadas -join '> <')>, esperado <$($desejadas -join '> <')>" }
+  foreach ($g in $gravadas) {
+    $m = Test-DependenciaValida $g
+    if ($m) { $falha = "<$g>: $m" }
+    elseif ($qc -notmatch [regex]::Escape($g.TrimStart('+'))) { $falha = "<$g> não aparece no sc qc" }
+  }
+  if ($falha) {
+    Write-Host "Conferência das dependências falhou ($falha): removendo todas as dependências para o serviço continuar iniciando."
+    [EfinSvcDeps]::Set($Name, [string[]]@())
+    if (@([EfinSvcDeps]::Get($Name)).Count -ne 0) { throw "Não consegui limpar as dependências do serviço $Name." }
+  } else {
+    Write-Host "Conferência das dependências OK: $depois"
+  }
+}
+
+# Automático (Atraso), ações de falha e dependências — no serviço atual, sem recriá-lo.
+function Set-ServicoRobusto {
+  param([string]$Name, [string[]]$DepsBanco)
+  $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+  Invoke-Checked $sc @('config', $Name, 'start=', 'delayed-auto')
+  Invoke-Checked $sc @('failure', $Name, 'reset=', "$SvcResetSec", 'actions=', $SvcFailActions)
+  Invoke-Checked $sc @('failureflag', $Name, '1')
+  Set-DependenciasServico $Name $DepsBanco
+}
+
+function Write-ServicoConfig {
+  param([string]$Name)
+  $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+  Write-Host "---- validação do serviço $Name ----"
+  foreach ($q in 'qc', 'qfailure', 'qfailureflag') { [void](Invoke-Captured $sc @($q, $Name)) }
+  Write-Host '------------------------------------'
+}
+
 try {
   $Fresh = -not (Test-Path $EnvFile)
 
@@ -126,6 +442,7 @@ try {
     Restrict-Acl $ParamsFile   # contém a senha do banco em texto puro até ser apagado no finally
 
     if ($P.dbMode -eq 'embedded') {
+      $script:Etapa = 'Instalação do PostgreSQL embutido e criação do banco'
       $pgBin     = Join-Path $App 'pgsql\bin'
       $adminFile = Join-Path $ConfigDir 'pg-admin.txt'
 
@@ -165,6 +482,7 @@ try {
         '-c', "CREATE DATABASE $dbName OWNER $dbUser ENCODING 'UTF8' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C';")
       Remove-Item Env:\PGPASSWORD
     } else {
+      $script:Etapa = 'Conexão com o banco de dados'
       $dbType = if ($P.dbType) { $P.dbType } else { 'postgres' }
       $dbHost = $P.dbHost; $dbPort = $P.dbPort; $dbName = $P.dbName; $dbUser = $P.dbUser; $dbPass = $P.dbPassword
       # "servidor\instancia" do SQL Server: a porta real e resolvida pelo SQL Server Browser
@@ -181,6 +499,7 @@ try {
       }
     }
 
+    $script:Etapa = 'Gravação da configuração (config\backend.env)'
     $globalLines = @(Read-GlobalDefaults $GlobalsFile)   # LICENSE_PUBLIC_KEY_B64, CERT_SERVIDOR_RFB, ...
     $envLines = @(
       'NODE_ENV=production',
@@ -212,6 +531,7 @@ try {
   }
   # ------------------------------------------------------------------ atualização
   else {
+    $script:Etapa = 'Atualização da configuração (config\backend.env)'
     # backend.env já existe e não é recriado; sem isto, um CERT_SERVIDOR_RFB renovado nunca chegaria
     # nas instalações existentes. Atualiza/acrescenta só as chaves de global-defaults.env.
     $current = @(Get-Content $EnvFile -Encoding UTF8)
@@ -237,6 +557,7 @@ try {
 
   # ------------------------------------------------------------------ tabelas + Cliente + administrador (só instalação nova)
   if ($Fresh) {
+    $script:Etapa = 'Criação das tabelas, da instituição e do administrador'
     Push-Location $BackendDir
     try {
       $env:CLIENTE_NOME = $P.clienteNome; $env:CLIENTE_CNPJ = $P.clienteCnpj
@@ -270,18 +591,35 @@ try {
   }
 
   # ------------------------------------------------------------------ serviço do Windows (WinSW)
+  $script:Etapa = 'Registro do serviço do Windows'
   $svcDir = Join-Path $App 'services'
   $svcExe = Join-Path $svcDir "$SvcName.exe"
 
-  # Para/remove o serviço antigo ANTES de sobrescrever o executável do WinSW (senão: arquivo em uso)
-  if (Get-Service $SvcName -ErrorAction SilentlyContinue) {
+  # Serviço já existente apontando para o nosso WinSW: atualiza no lugar (para, troca exe/XML, reaplica a
+  # configuração de boot) — sem recriar. Só recria se estiver registrado com outro executável.
+  $svcAtual = Get-CimInstance Win32_Service -Filter "Name = '$SvcName'" -ErrorAction SilentlyContinue
+  $noLugar = $false
+  if ($svcAtual) {
+    $binAtual = $svcAtual.PathName.Trim().Trim('"')
+    $noLugar = ($binAtual -ieq $svcExe)
+    # Para ANTES de sobrescrever o executável do WinSW (senão: arquivo em uso)
     & sc.exe stop $SvcName | Out-Null
-    Start-Sleep -Seconds 3
-    if (Test-Path $svcExe) { Invoke-Checked $svcExe @('uninstall') }
-    else { Invoke-Checked "$env:SystemRoot\System32\sc.exe" @('delete', $SvcName) }
-    Start-Sleep -Seconds 2
+    try { (Get-Service $SvcName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) }
+    catch { throw "O serviço $SvcName não parou em 30 segundos." }
+    if ($noLugar) {
+      Write-Host "Serviço $SvcName existente: atualizando no lugar, sem recriar."
+    } else {
+      Write-Host "Serviço $SvcName registrado com outro executável ($binAtual): recriando."
+      if (Test-Path $svcExe) { Invoke-Checked $svcExe @('uninstall') }
+      else { Invoke-Checked "$env:SystemRoot\System32\sc.exe" @('delete', $SvcName) }
+      Start-Sleep -Seconds 2
+    }
   }
   Copy-Item (Join-Path $svcDir 'WinSW-x64.exe') $svcExe -Force
+
+  # Banco nesta máquina? Vale para os dois fluxos: DB_* vêm do backend.env já decifrado acima
+  $dbName = if ($env:DB_SERVICE_NAME) { $env:DB_SERVICE_NAME } else { $env:DB_NAME }
+  $depsBanco = @(Get-DependenciasBanco $env:DB_TYPE $env:DB_HOST $env:DB_PORT $dbName)
 
   # O serviço roda scripts\run-service.ps1, que decifra config\backend.env só em memória e lança o
   # node.exe. Nenhum segredo vai para o XML do WinSW.
@@ -289,8 +627,8 @@ try {
   $psExe     = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $runSvc    = Join-Path $App 'scripts\run-service.ps1'
   $svcArgs   = "-NoProfile -ExecutionPolicy Bypass -File `"$runSvc`""
-  $dep = ''
-  if (Get-Service $PgSvc -ErrorAction SilentlyContinue) { $dep = "  <depend>$PgSvc</depend>" }
+  # Mesmas dependências no XML, para um "install" manual do WinSW sair igual ao que o sc.exe aplica
+  $dep = ($depsBanco | ForEach-Object { "  <depend>$(& $esc $_)</depend>" }) -join "`r`n"
 
   $xml = @"
 <service>
@@ -302,9 +640,11 @@ try {
   <workingdirectory>$(& $esc $BackendDir)</workingdirectory>
 $dep
   <startmode>Automatic</startmode>
-  <onfailure action="restart" delay="10 sec"/>
+  <delayedAutoStart>true</delayedAutoStart>
   <onfailure action="restart" delay="30 sec"/>
-  <onfailure action="none"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <onfailure action="restart" delay="120 sec"/>
+  <resetfailure>1 day</resetfailure>
   <logpath>$(& $esc $LogDir)</logpath>
   <log mode="roll-by-size">
     <sizeThreshold>10240</sizeThreshold>
@@ -316,7 +656,10 @@ $dep
   Set-Content -Path $xmlPath -Value $xml -Encoding UTF8
   Restrict-Acl $xmlPath   # sem segredos, mas define o que roda como SYSTEM
 
-  Invoke-Checked $svcExe @('install')
+  if (-not $noLugar) { Invoke-Checked $svcExe @('install') }
+  Set-ServicoRobusto $SvcName $depsBanco
+  Write-ServicoConfig $SvcName   # antes do start: fica no log mesmo se o serviço não subir
+  $script:Etapa = 'Início do serviço'
   Invoke-Checked $svcExe @('start')
 
   # ------------------------------------------------------------------ firewall e atalho
@@ -327,6 +670,7 @@ $dep
   Set-Content -Path (Join-Path $App 'e-Financeira.url') -Encoding ASCII -Value @(
     '[InternetShortcut]', "URL=http://localhost:$HttpPort")
 
+  $script:Etapa = "Aguardando o e-Financeira responder na porta $HttpPort"
   if (-not (Wait-Port $HttpPort 90)) {
     throw "O serviço foi iniciado, mas a porta $HttpPort não respondeu. Veja os logs em $LogDir."
   }
@@ -334,7 +678,10 @@ $dep
   exit 0
 }
 catch {
-  Write-Host "ERRO: $($_ | Out-String)"
+  $falha = $_
+  Write-Host "ERRO: $($falha | Out-String)"
+  # Resumo para a tela de falha do instalador; se até isto falhar, o instalador mostra a mensagem genérica
+  try { Write-ErroInstalacao (Get-LinhaUtilDeErro $script:SaidaDaFalha $falha.Exception.Message) } catch { Write-Host "Não consegui gravar $ErroFile : $_" }
   exit 1
 }
 finally {

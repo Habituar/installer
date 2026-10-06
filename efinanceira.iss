@@ -129,68 +129,8 @@ begin
   Result := S;
 end;
 
-{ O Pascal Script do Inno so tem LoadStringFromFile para AnsiString (bytes crus, sem codepage) —
-  nao existe overload para String (Unicode) que decodifique UTF-8 sozinho, e um cast direto
-  String(AnsiStr) reinterpreta cada byte pela codepage ANSI da maquina, dando o mojibake classico
-  ("ção" grava 2 bytes em UTF-8 — 0xC3 0xA7 — que viram "Ã§" se lidos um a um como CP1252). Por
-  isso decodificamos o UTF-8 na mao aqui: o PowerShell grava o arquivo com Out-File -Encoding utf8
-  (UTF-8 com BOM), pulamos o BOM e convertemos byte a byte pra Unicode. }
-function Utf8Decode(const S: AnsiString): String;
-var
-  I, Len, Inicio: Integer;
-  B1, B2, B3, B4: Byte;
-  Code: LongInt;
-begin
-  Result := '';
-  Len := Length(S);
-  Inicio := 1;
-  if (Len >= 3) and (Ord(S[1]) = $EF) and (Ord(S[2]) = $BB) and (Ord(S[3]) = $BF) then
-    Inicio := 4;   { pula o BOM UTF-8 }
-  I := Inicio;
-  while I <= Len do
-  begin
-    B1 := Ord(S[I]);
-    if B1 < $80 then                        { ASCII puro: 1 byte }
-    begin
-      Result := Result + Chr(B1);
-      Inc(I);
-    end
-    else if (B1 and $E0) = $C0 then         { 110xxxxx 10xxxxxx: 2 bytes }
-    begin
-      if I + 1 <= Len then
-      begin
-        B2 := Ord(S[I + 1]);
-        Result := Result + Chr(((B1 and $1F) shl 6) or (B2 and $3F));
-      end;
-      I := I + 2;
-    end
-    else if (B1 and $F0) = $E0 then         { 1110xxxx 10xxxxxx 10xxxxxx: 3 bytes (a maioria dos acentos) }
-    begin
-      if I + 2 <= Len then
-      begin
-        B2 := Ord(S[I + 1]);
-        B3 := Ord(S[I + 2]);
-        Result := Result + Chr(((B1 and $0F) shl 12) or ((B2 and $3F) shl 6) or (B3 and $3F));
-      end;
-      I := I + 3;
-    end
-    else if (B1 and $F8) = $F0 then         { 11110xxx ...: 4 bytes -> par substituto UTF-16 }
-    begin
-      if I + 3 <= Len then
-      begin
-        B2 := Ord(S[I + 1]);
-        B3 := Ord(S[I + 2]);
-        B4 := Ord(S[I + 3]);
-        Code := ((B1 and $07) shl 18) or ((B2 and $3F) shl 12) or ((B3 and $3F) shl 6) or (B4 and $3F);
-        Code := Code - $10000;
-        Result := Result + Chr($D800 + (Code shr 10)) + Chr($DC00 + (Code and $3FF));
-      end;
-      I := I + 4;
-    end
-    else
-      Inc(I);   { byte invalido/continuacao solta: ignora }
-  end;
-end;
+{ Utf8Decode, LerResumoErroInstalacao e MensagemFalhaConfiguracao: codigo compartilhado com os testes do instalador }
+#include "codigo-comum.iss"
 
 { Testa a conexao com os dados preenchidos na pagina "Conexao com o banco de dados".
   SQL Server: login de verdade (System.Data.SqlClient, que ja vem no Windows) — confirma
@@ -811,16 +751,25 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  RC: Integer;
+  RC, ErroAbrir: Integer;
+  ArquivoErro, ArquivoLog: String;
 begin
   if CurStep = ssPostInstall then
   begin
     WriteParams;
+    ArquivoErro := ExpandConstant('{app}\logs\install-erro.txt');
+    ArquivoLog := ExpandConstant('{app}\logs\install.log');
+    DeleteFile(ArquivoErro); { nunca mostrar o erro de uma execucao anterior (ex.: powershell nem chegou a rodar) }
     WizardForm.StatusLabel.Caption := 'Configurando banco de dados e servicos (pode levar alguns minutos)...';
     if (not Exec('powershell.exe',
           '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\postinstall.ps1') + '"',
           ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, RC)) or (RC <> 0) then
-      MsgBox('A configuracao final falhou (codigo ' + IntToStr(RC) + ').' + #13#10 +
-             'Veja o log em: ' + ExpandConstant('{app}\logs\install.log'), mbError, MB_OK);
+    begin
+      { Erro real gravado pelo postinstall.ps1 (linha util + etapa); sem o arquivo, a mensagem generica de antes.
+        SuppressibleMsgBox: na instalacao silenciosa (/SUPPRESSMSGBOXES) responde "Nao" e nao abre o Bloco de Notas. }
+      if SuppressibleMsgBox(MensagemFalhaConfiguracao(RC, LerResumoErroInstalacao(ArquivoErro), ArquivoLog),
+           mbError, MB_YESNO, IDNO) = IDYES then
+        ShellExec('', 'notepad.exe', '"' + ArquivoLog + '"', '', SW_SHOWNORMAL, ewNoWait, ErroAbrir);
+    end;
   end;
 end;
