@@ -92,3 +92,7 @@ integração (`tests/integracao/*.test.ts` com `CRS_TESTE_ORA_*`).
 **Motivo:** no Oracle o TypeORM cria `"typeorm_migrations"` citada em minúsculas; o SQL antigo, sem aspas, procuraria
 `TYPEORM_MIGRATIONS` (ORA-00942). A correção (back `afb1afb`) foi conferida só como texto gerado pelo driver Oracle e
 executada no PostgreSQL e no SQL Server — não havia Oracle disponível.
+
+## 9. PostgreSQL embutido
+
+Trocar o 16.4-1 (08/2024) pela correção mais nova da série 16 publicada pela EnterpriseDB (há até a 16.12-1; `-PgInstallerUrl` no `build.ps1`), testando instalação nova e atualização.
