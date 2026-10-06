@@ -33,13 +33,32 @@ O formato antigo (HS256 com `LICENSE_SECRET`) **não é mais aceito**. Quem edit
 
 ## Gerar o instalador
 
-Requisitos: Windows x64, Node 20, [Inno Setup 6.3+](https://jrsoftware.org/isdl.php). Na pasta que contém `efinanceira-back`, `efinanceira-front` e `installer`:
+Requisitos: Windows x64, Node 22, [Inno Setup 6.3+](https://jrsoftware.org/isdl.php). Na pasta que contém `efinanceira-back`, `efinanceira-front` e `installer`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File installer\build.ps1 -Version 1.0.0
 ```
 
 Resultado: `installer\output\efinanceira-onpremise-1.0.0-setup.exe`.
+
+## Dependências externas (pasta `deps\`)
+
+`deps\`, `stage\` e `output\` **não são versionados** (`.gitignore`). `stage\` é recriado do zero a cada build e `output\` recebe os instaladores gerados. Em `deps\` ficam três arquivos de terceiros; com internet, o `build.ps1` baixa cada um do endereço oficial quando falta (baixa para `<arquivo>.part` e só renomeia no fim, então um download interrompido não fica "em cache"):
+
+| Arquivo em `deps\` | Origem (parâmetro do `build.ps1`) | Quando é usado |
+|---|---|---|
+| `node-v22.14.0-win-x64.zip` | `https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip` (`-NodeVersion`); SHA-256 conferido com o `SHASUMS256.txt` oficial | sempre (Node embutido) |
+| `WinSW-x64.exe` | `https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe` (`-WinSWUrl`) | sempre (serviço do Windows) |
+| `postgresql-installer.exe` | `https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64.exe` (`-PgInstallerUrl`) | só no instalador **com** PostgreSQL (não com `-SemPostgres`) |
+
+**Máquina de build sem internet:** baixe os arquivos acima em outra máquina, com **exatamente esses nomes**, e coloque-os em `installer\deps\` antes do build. Para só preparar ou conferir a pasta, sem exigir back/front/Inno Setup e sem gerar instalador:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SoDependencias              # os três
+powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SoDependencias -SemPostgres  # sem o PostgreSQL
+```
+
+Se faltar um arquivo e o download falhar, o build para com a mensagem "Não consegui obter <arquivo> de <endereço> (...) Baixe o arquivo em outra e coloque-o em ...\deps\<arquivo>".
 
 ## Entregar a um cliente
 

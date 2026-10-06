@@ -12,3 +12,9 @@ out/
 *.lic
 *.exe
 *.msi
+
+# Artefatos do build.ps1 — NAO versionar: deps\ e baixado dos enderecos oficiais quando falta, stage\ e recriado
+# do zero a cada build e output\ guarda os instaladores gerados (ver README, "Dependencias externas")
+/deps/
+/stage/
+/output/

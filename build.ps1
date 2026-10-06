@@ -14,19 +14,24 @@
   Antes da primeira vez: node installer\tools\gerar-chaves-licenca.mjs (gera installer\license-public.pem).
   Precisa ser Windows porque módulos nativos baixam binários específicos da plataforma;
   o que for empacotado é o que roda no cliente.
+
+  deps\ e stage\ NÃO são versionados: deps\ (zip do Node, WinSW, instalador do PostgreSQL) é baixado dos endereços
+  oficiais quando falta, e stage\ é recriado do zero a cada build. Só preparar deps\ (sem gerar nada):
+      powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SoDependencias [-SemPostgres]
 #>
 param(
-  [Parameter(Mandatory = $true)]
   [ValidatePattern('^\d+\.\d+\.\d+$')]
-  [string]$Version,
+  [string]$Version,                # obrigatória para gerar o instalador; dispensada com -SoDependencias
   [string]$BackendDir     = "efinanceira-back",
   [string]$FrontendDir    = "efinanceira-front",
   [string]$LicensePublicKey = "",   # PEM da chave PUBLICA (padrao: installer\license-public.pem) — so para conferir config\global-defaults.env
   [string]$NodeVersion    = "22.14.0",
   [string]$PgInstallerUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64.exe",
   [string]$WinSWUrl       = "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
-  [switch]$SemPostgres    # instalador sem PostgreSQL (so SQL Server ou Oracle existentes): nao baixa nem embute o PostgreSQL
+  [switch]$SemPostgres,   # instalador sem PostgreSQL (so SQL Server ou Oracle existentes): nao baixa nem embute o PostgreSQL
+  [switch]$SoDependencias # so baixa/confere deps\ e sai (nao exige back/front/Inno Setup, nao gera instalador)
 )
+if (-not $SoDependencias -and -not $Version) { throw "Informe -Version X.Y.Z (ex.: -Version 1.2.27)." }
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -45,12 +50,48 @@ function Invoke-Checked {
   if ($LASTEXITCODE -ne 0) { throw "Falhou: $Exe $($ArgList -join ' ') (código $LASTEXITCODE)" }
 }
 
+# Dependência externa em deps\ (não versionada): usa a que já estiver lá; senão baixa do endereço oficial. Baixa para
+# <arquivo>.part e só renomeia no fim — antes um download interrompido deixava um arquivo pela metade que os builds
+# seguintes tratavam como "em cache". Sem internet: coloque o arquivo em deps\ à mão (README, "Dependências externas").
 function Get-Dep {
-  param([string]$Url, [string]$Dest)
-  if (Test-Path $Dest) { Write-Host "  em cache: $(Split-Path -Leaf $Dest)"; return }
+  param([string]$Url, [string]$Dest, [string]$Sha256Url)
+  $nome = Split-Path -Leaf $Dest
+  if (Test-Path $Dest) {
+    if ((Get-Item $Dest).Length -gt 0) { Write-Host "  em cache: $nome"; return }
+    Remove-Item $Dest -Force   # arquivo vazio de uma tentativa antiga
+  }
+  $parcial = "$Dest.part"
   Write-Host "  baixando $Url"
-  Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+  try {
+    Invoke-WebRequest -Uri $Url -OutFile $parcial -UseBasicParsing
+    if ((Get-Item $parcial).Length -eq 0) { throw 'o servidor devolveu um arquivo vazio' }
+    if ($Sha256Url) {   # soma oficial publicada junto do arquivo (ex.: SHASUMS256.txt do nodejs.org)
+      $somas = (Invoke-WebRequest -Uri $Sha256Url -UseBasicParsing).Content
+      $esperado = ([regex]::Match($somas, "(?m)^([0-9a-f]{64})\s+$([regex]::Escape($nome))\s*$")).Groups[1].Value
+      if (-not $esperado) { throw "$nome não consta em $Sha256Url" }
+      $obtido = (Get-FileHash $parcial -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($obtido -ne $esperado) { throw "SHA-256 não confere (esperado $esperado, obtido $obtido)" }
+      Write-Host "  SHA-256 conferido: $nome"
+    }
+    Move-Item $parcial $Dest -Force
+  } catch {
+    if (Test-Path $parcial) { Remove-Item $parcial -Force }
+    throw "Não consegui obter $nome de $Url ($($_.Exception.Message)). Sem internet nesta máquina? Baixe o arquivo em " +
+      "outra e coloque-o em $Dest (ver README, seção `"Dependências externas`")."
+  }
 }
+
+function Get-Dependencias {
+  Write-Host "==> Dependências externas (deps\)"
+  New-Item -ItemType Directory -Force -Path $Deps | Out-Null
+  Get-Dep "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" (Join-Path $Deps "node-v$NodeVersion-win-x64.zip") `
+    "https://nodejs.org/dist/v$NodeVersion/SHASUMS256.txt"
+  Get-Dep $WinSWUrl (Join-Path $Deps 'WinSW-x64.exe')
+  if (-not $SemPostgres) { Get-Dep $PgInstallerUrl (Join-Path $Deps 'postgresql-installer.exe') }
+}
+
+# Só prepara deps\ (máquina sem internet, ou conferir antes do build): não exige back/front/Inno Setup nem gera nada
+if ($SoDependencias) { Get-Dependencias; Write-Host "deps\ pronta: $Deps" -ForegroundColor Green; exit 0 }
 
 # ---------------------------------------------------------------- pré-checagem
 $iscc = @(
@@ -89,12 +130,8 @@ if (($embutida -replace '\s', '') -ne ($doPar -replace '\s', '')) {
 }
 
 # ---------------------------------------------------------------- dependências
-Write-Host "==> Dependências externas"
-New-Item -ItemType Directory -Force -Path $Deps | Out-Null
+Get-Dependencias
 $nodeZip = Join-Path $Deps "node-v$NodeVersion-win-x64.zip"
-Get-Dep "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" $nodeZip
-Get-Dep $WinSWUrl (Join-Path $Deps 'WinSW-x64.exe')
-if (-not $SemPostgres) { Get-Dep $PgInstallerUrl (Join-Path $Deps 'postgresql-installer.exe') }
 
 # ---------------------------------------------------------------- stage limpo
 Write-Host "==> Preparando stage"
