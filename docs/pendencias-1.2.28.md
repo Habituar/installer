@@ -1,0 +1,94 @@
+# Pendências para o 1.2.28
+
+Ficaram de fora do hotfix 1.2.27 (correção do PostgreSQL, inicialização robusta do serviço, erro real na falha do
+instalador e `index.html` sem cache). Nada abaixo está implementado. Linhas citadas: back `main` `f9809e7`, front
+`main` `b68a895`, installer `main` `bb7e9ce`.
+
+## 1. Detecção de banco existente antes de pedir o administrador
+
+**O quê:** depois do "Testar conexão", o instalador detecta o que há no banco e, se já houver o e-Financeira
+configurado, pula as páginas de instituição e administrador e mostra na tela: instituição (CNPJ), administradores
+(login/e-mail) e "nenhum usuário será criado". Banco com tabelas de outro sistema pede confirmação; mais de um cliente
+ou versão de banco mais nova que o instalador bloqueia. O setup deixa de ser silencioso: código de saída próprio
+para "já configurado", mostrado pelo instalador.
+
+**Motivo:** instalando sobre um banco com dados, o instalador pediu os dados do administrador e os descartou sem
+avisar — `onpremise-setup.ts` encerra com "Instalação já configurada: nenhum dado criado." quando já existe `Cliente`.
+PostgreSQL e Oracle não têm driver no Windows: a detecção precisa de um script empacotado (Node + drivers) rodado da
+pasta temporária.
+
+## 2. Estado de instalação incompleta
+
+**O quê:** o `postinstall.ps1` grava `config\instalacao.json` (versão e data) só no fim de uma instalação
+bem-sucedida. O instalador passa a distinguir **nova** (sem `backend.env`), **atualização** (marcador presente; em
+instalação antiga sem marcador, serviço `efinanceira-api` registrado) e **incompleta** (`backend.env` sem marcador e
+sem serviço). Incompleta: reaproveita o banco do `backend.env`, pede só instituição e administrador e conclui.
+Instalação nova que falha deixa o serviço instalado e parado (inicialização manual); atualização que falha oferece o
+rollback (`rollback.ps1`, pasta `previous\`).
+
+**Motivo:** o `backend.env` é gravado antes da criação das tabelas; depois de uma falha, a nova execução vira
+"atualização" (`IsUpgrade` = `backend.env` existe) e nunca cria o administrador — foi o que aconteceu na máquina do
+teste do 1.2.26 (recuperação manual descrita na conversa do hotfix).
+
+## 3. Script local de reset de senha do administrador
+
+**O quê:** script no back (ex.: `scripts/redefinirSenhaAdmin`) e atalho no menu Iniciar "Redefinir senha do
+administrador", que exige administrador do Windows (como o atalho de rollback). Gera senha temporária, força a troca
+no próximo login, desbloqueia o usuário e registra na auditoria (`LogAuditoria`).
+
+**Motivo:** no on-premise não há rota nem script para o caso "o único administrador esqueceu a senha". Hoje só um
+Administrador troca a senha de outro (`PUT /api/usuarios/:id`) e o Diretor redefine a do administrador de um cliente
+(`POST /api/super/tenants/:id/reset-senha-admin`), recurso do SaaS.
+
+## 4. Login do instalador
+
+**O quê:** aceitar qualquer caixa (normalizar para minúsculas antes de validar, como o setup já faz) e e-mail: com
+`@`, se igual ao e-mail informado (ou com e-mail vazio), o login vira a parte antes do `@` e o instalador avisa que dá
+para entrar com o e-mail ou com o login; diferente do e-mail, recusa explicando. A mensagem de erro diz o caractere e
+a posição (ex.: `O caractere "@" (posição 14) não é permitido no login`). No back, a busca por login passa a ignorar
+caixa nos 3 bancos (`LOWER(login) = LOWER(:x)`), com checagem prévia de logins que só diferem na caixa.
+
+**Motivo:** o instalador recusou `wesdras.alves@zapsistemas.com.br` com uma regra (`efinanceira.iss`, `LoginValido`)
+mais estrita que a tela de login, que aceita e-mail (com `@` busca pelo e-mail, `authService.ts:82-85`). A busca por
+login é exata: ignora caixa no SQL Server (collation) e não no PostgreSQL/Oracle.
+
+## 5. Textos de "Esqueceu a senha?" e do aviso de perda de acesso no on-premise
+
+**O quê:** com `isOnPremise`, trocar o texto por: "Peça a um administrador do e-Financeira da sua instituição para
+redefinir sua senha (Configurações → Usuários). Se você é o único administrador, o responsável pelo servidor pode
+redefini-la pelo atalho 'Redefinir senha do administrador' no menu Iniciar do servidor." (depende do item 3).
+
+**Motivo:** a tela do on-premise manda procurar `suporte@efinanceira.com.br`, contato do SaaS, e não diz o
+procedimento real de redefinição.
+
+## 6. `SUPORTE_CONTATO` do on-premise
+
+**O quê:** chave `SUPORTE_CONTATO=chamados.cfi@zapsistemas.com.br` em `config\global-defaults.env` (vai para o
+`backend.env` como os demais valores globais), exposta ao front e exibida **só quando `isOnPremise`** nos 4 pontos que
+hoje mostram o e-mail do SaaS:
+- `src/pages/Login.tsx:259` (aviso de perda de acesso)
+- `src/pages/Login.tsx:323` (rodapé "Suporte:")
+- `src/components/layout/Layout.tsx:224` (faixa "LICENÇA SUSPENSA")
+- `src/pages/ContaCancelada.tsx:38`
+
+**Motivo:** o contato não pode ficar fixo no código (troca exigiria novo build do front) e o do SaaS não serve ao
+cliente on-premise. Sem a chave definida, o on-premise não mostra contato.
+
+## 7. Deadlock na limpeza dos testes de integração em paralelo
+
+**O quê:** colocar a limpeza (`after` → `limpar()`) dos testes de `tests/integracao/` dentro do `comRetryDeadlock`
+(`lib/deadlock.ts`, já existente); depois disso, voltar a rodar a integração em paralelo.
+
+**Motivo:** com os arquivos rodando em paralelo no mesmo banco de teste (`efinanceira_migracao_teste`), o `DELETE` da
+limpeza de "migração — trava de contas omitidas" foi escolhido como vítima de deadlock (todos os testes do arquivo
+passaram; falhou o hook). Em série (`--test-concurrency=1`) não ocorre — é como a integração está sendo rodada.
+
+## 8. Oracle: `typeorm_migrations` sem aspas — sem teste em Oracle real
+
+**O quê:** rodar em Oracle real o rollback (`scripts/reverterParaVersao.ts`) e o pacote de diagnóstico
+(`services/diagnostico.ts`), que agora usam `lib/migracoesAplicadas.ts` (identificadores citados pelo driver), e a
+integração (`tests/integracao/*.test.ts` com `CRS_TESTE_ORA_*`).
+
+**Motivo:** no Oracle o TypeORM cria `"typeorm_migrations"` citada em minúsculas; o SQL antigo, sem aspas, procuraria
+`TYPEORM_MIGRATIONS` (ORA-00942). A correção (back `afb1afb`) foi conferida só como texto gerado pelo driver Oracle e
+executada no PostgreSQL e no SQL Server — não havia Oracle disponível.
