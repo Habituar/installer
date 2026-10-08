@@ -29,6 +29,8 @@ Get-Content $EnvFile -Encoding UTF8 | ForEach-Object {
 
 # Pasta dos logs do WinSW: o pacote de diagnóstico (GET /api/configuracoes/diagnostico) lê os mais recentes daqui
 $env:LOG_DIR = Join-Path $App 'logs'
+# Certificados de criptografia de lotes da RFB (um por ambiente), renováveis sem reinstalar (postinstall.ps1)
+$env:RFB_CERTS_DIR = Join-Path $App 'config\rfb'
 Set-Location $BackendDir
 & $Node $entry
 exit $LASTEXITCODE

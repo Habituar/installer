@@ -96,3 +96,9 @@ executada no PostgreSQL e no SQL Server — não havia Oracle disponível.
 ## 9. PostgreSQL embutido
 
 Trocar o 16.4-1 (08/2024) pela correção mais nova da série 16 publicada pela EnterpriseDB (há até a 16.12-1; `-PgInstallerUrl` no `build.ps1`), testando instalação nova e atualização.
+
+## 10. Certificados de criptografia da RFB
+
+Renovar certificados de criptografia RFB: Produção vence em 25/11/2026, Produção Restrita em 23/12/2026; baixar os novos em http://sped.rfb.gov.br/pasta/show/2064 e distribuir.
+
+Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 30 dias). O "Testar Conectividade" mostra se a chave do servidor confere com o certificado em uso.

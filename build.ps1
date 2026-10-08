@@ -101,14 +101,14 @@ $iscc = @(
 if (-not $iscc) { throw "Inno Setup 6 não encontrado. Instale em https://jrsoftware.org/isdl.php" }
 if (-not (Test-Path (Join-Path $Backend 'package.json')))  { throw "Backend não encontrado em $Backend (use -BackendDir)" }
 if (-not (Test-Path (Join-Path $Frontend 'package.json'))) { throw "Frontend não encontrado em $Frontend (use -FrontendDir)" }
-# Valores globais fixos (LICENSE_PUBLIC_KEY_B64, CERT_SERVIDOR_RFB, ...): vão como estão para o backend.env
+# Valores globais fixos (LICENSE_PUBLIC_KEY_B64, ...): vão como estão para o backend.env
 $GlobalDefaults = Join-Path $Installer 'config\global-defaults.env'
 if (-not (Test-Path $GlobalDefaults)) { throw "Arquivo de valores globais não encontrado: $GlobalDefaults" }
 $globals = @{}
 Get-Content $GlobalDefaults -Encoding UTF8 | ForEach-Object {
   if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { $globals[$Matches[1]] = $Matches[2].TrimEnd() }
 }
-foreach ($k in 'LICENSE_PUBLIC_KEY_B64', 'CERT_SERVIDOR_RFB') {
+foreach ($k in @('LICENSE_PUBLIC_KEY_B64')) {
   if (-not $globals[$k]) { throw "$k ausente ou vazio em $GlobalDefaults" }
 }
 $licPem = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($globals['LICENSE_PUBLIC_KEY_B64']))
@@ -174,6 +174,17 @@ try {
   if (-not $entry) { throw "Não consegui achar o arquivo de entrada em scripts.start do backend (esperado: `"node dist/index.js`")." }
   if (-not (Test-Path 'dist\scripts\onpremise-setup.js')) { throw "dist\scripts\onpremise-setup.js não foi gerado. Copie src\scripts\onpremise-setup.ts para o backend." }
 
+  # Certificados de criptografia de lotes da RFB (padrão empacotado, um por ambiente — src\recursos\rfb): sem eles,
+  # ou vencidos, nenhum lote sairia; perto de vencer, avisa para trocar pelos novos do portal SPED antes de entregar
+  foreach ($cer in 'cert-criptografia-producao.cer', 'cert-criptografia-producao-restrita.cer') {
+    $caminho = Join-Path 'dist\recursos\rfb' $cer
+    if (-not (Test-Path $caminho)) { throw "Certificado de criptografia da RFB ausente no build: $caminho (src\recursos\rfb)." }
+    $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (Resolve-Path $caminho).Path
+    $dias = [int]($x509.NotAfter - (Get-Date)).TotalDays
+    if ($dias -le 0) { throw "Certificado de criptografia da RFB VENCIDO no build: $cer (venceu em $($x509.NotAfter.ToString('dd/MM/yyyy'))). Baixe o novo em http://sped.rfb.gov.br/pasta/show/2064." }
+    if ($dias -le 30) { Write-Warning "$cer vence em $dias dia(s) ($($x509.NotAfter.ToString('dd/MM/yyyy'))): troque pelo novo do portal SPED." }
+    else { Write-Host "    $cer ok (vence em $($x509.NotAfter.ToString('dd/MM/yyyy')), SHA-1 $($x509.Thumbprint))" }
+  }
   Copy-Item dist "$Stage\backend\dist" -Recurse
   Copy-Item package.json, package-lock.json "$Stage\backend"
   # UTF-8 SEM BOM: o Set-Content -Encoding UTF8 do PowerShell 5.1 grava BOM, o JSON.parse do backend recusava o

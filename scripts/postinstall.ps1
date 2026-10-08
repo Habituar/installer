@@ -25,6 +25,36 @@ $SvcName    = 'efinanceira-api'
 $PgSvc      = 'efinanceira-pg'
 $PgPort     = 5433   # fora da 5432 para não colidir com outro PostgreSQL da máquina
 
+# ------------------------------------------------------------------ certificados de criptografia da RFB
+# Os certificados públicos da RFB para cifrar os lotes (Produção e Produção Restrita) vêm no pacote do backend
+# (backend\dist\recursos\rfb) e ficam em config\rfb, de onde o sistema os lê (RFB_CERTS_DIR, ver run-service.ps1).
+# O Administrador renova pela tela (Configurações > Certificados da RFB) ou trocando o arquivo, sem reinstalar.
+# Na atualização, o arquivo da pasta só é trocado pelo do pacote se o do pacote vencer DEPOIS (não desfaz uma
+# renovação mais nova feita pelo Administrador); o anterior fica como .anterior.
+function Install-CertificadosRfb {
+  $origem  = Join-Path $App 'backend\dist\recursos\rfb'
+  $destino = Join-Path $ConfigDir 'rfb'
+  New-Item -ItemType Directory -Force -Path $destino | Out-Null
+  foreach ($arq in @(Get-ChildItem -Path $origem -Filter '*.cer' -ErrorAction SilentlyContinue)) {
+    $alvo = Join-Path $destino $arq.Name
+    $novo = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $arq.FullName
+    if (-not (Test-Path $alvo)) {
+      Copy-Item $arq.FullName $alvo
+      Write-Host "Certificado RFB $($arq.Name) instalado (vence em $($novo.NotAfter.ToString('dd/MM/yyyy')))."
+      continue
+    }
+    $atual = $null
+    try { $atual = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $alvo } catch { }
+    if (-not $atual -or $novo.NotAfter -gt $atual.NotAfter) {
+      Copy-Item $alvo "$alvo.anterior" -Force
+      Copy-Item $arq.FullName $alvo -Force
+      Write-Host "Certificado RFB $($arq.Name) atualizado pelo do pacote (vence em $($novo.NotAfter.ToString('dd/MM/yyyy')))."
+    } else {
+      Write-Host "Certificado RFB $($arq.Name) mantido (o da pasta vence em $($atual.NotAfter.ToString('dd/MM/yyyy')), não antes do do pacote)."
+    }
+  }
+}
+
 # ------------------------------------------------------------------ resumo do erro para a tela do instalador
 # Antes a falha só dizia "a configuração final falhou (código 1), veja o log". Agora o catch grava em
 # logs\install-erro.txt a linha útil do erro (da saída do último comando externo que falhou — o setup em Node, por
@@ -500,7 +530,7 @@ try {
     }
 
     $script:Etapa = 'Gravação da configuração (config\backend.env)'
-    $globalLines = @(Read-GlobalDefaults $GlobalsFile)   # LICENSE_PUBLIC_KEY_B64, CERT_SERVIDOR_RFB, ...
+    $globalLines = @(Read-GlobalDefaults $GlobalsFile)   # LICENSE_PUBLIC_KEY_B64, ...
     $envLines = @(
       'NODE_ENV=production',
       'DEPLOYMENT_TYPE=on-premise',
@@ -532,7 +562,7 @@ try {
   # ------------------------------------------------------------------ atualização
   else {
     $script:Etapa = 'Atualização da configuração (config\backend.env)'
-    # backend.env já existe e não é recriado; sem isto, um CERT_SERVIDOR_RFB renovado nunca chegaria
+    # backend.env já existe e não é recriado; sem isto, um valor global renovado nunca chegaria
     # nas instalações existentes. Atualiza/acrescenta só as chaves de global-defaults.env.
     $current = @(Get-Content $EnvFile -Encoding UTF8)
     $changed = $false
@@ -549,8 +579,19 @@ try {
       $current += "ENCRYPTION_KEY=$(Protect-Secret (New-HexKey32))"; $changed = $true
       Write-Host 'ENCRYPTION_KEY gerada e adicionada ao backend.env.'
     }
+    # CERT_SERVIDOR_RFB (um certificado só, o da Produção Restrita, usado também em Produção) foi substituído pelos
+    # arquivos de config\rfb (um por ambiente): sai do backend.env para não confundir quem o ler
+    $semCertAntigo = @($current | Where-Object { $_ -notlike 'CERT_SERVIDOR_RFB=*' })
+    if ($semCertAntigo.Count -ne $current.Count) {
+      $current = $semCertAntigo; $changed = $true
+      Write-Host 'CERT_SERVIDOR_RFB removido do backend.env (agora: config\rfb, um certificado por ambiente).'
+    }
     if ($changed) { Set-Content -Path $EnvFile -Value $current -Encoding UTF8 }
   }
+
+  # Certificados de criptografia de lotes da RFB (um por ambiente) em config\rfb — renováveis sem reinstalar
+  $script:Etapa = 'Certificados de criptografia da RFB (config\rfb)'
+  Install-CertificadosRfb
 
   Import-EnvFile $EnvFile
   $HttpPort = [int]$env:PORT
