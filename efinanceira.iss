@@ -472,7 +472,7 @@ begin
   AdminPage.Add('Nome do administrador:', False);
   AdminPage.Add('Usuario (login):', False);
   AdminPage.Add('E-mail:', False);
-  AdminPage.Add('Senha (minimo 8 caracteres):', True);
+  AdminPage.Add('Senha (8+ caracteres, com maiuscula, numero e caractere especial):', True);
   AdminPage.Add('Confirmar senha:', True);
 
   { So na atualizacao: a nova versao aplica alteracoes no banco (migrations). O rollback (scripts\rollback.ps1)
@@ -501,6 +501,30 @@ begin
     if not (((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '.')) then Exit;
   end;
   Result := True;
+end;
+
+{ Regra unica de senha - a mesma do sistema (efinanceira-back/src/lib/regrasSenha.ts): 8+ caracteres, maiuscula,
+  numero e caractere especial. Devolve o que falta ('' = atende). }
+function FaltasSenha(V: String): String;
+var
+  I: Integer;
+  C: Char;
+  Mai, Num, Esp: Boolean;
+begin
+  Mai := False; Num := False; Esp := False;
+  for I := 1 to Length(V) do
+  begin
+    C := V[I];
+    if (C >= 'A') and (C <= 'Z') then Mai := True
+    else if (C >= '0') and (C <= '9') then Num := True
+    else if not ((C >= 'a') and (C <= 'z')) then Esp := True;
+  end;
+  Result := '';
+  if Length(V) < 8 then Result := Result + ', pelo menos 8 caracteres';
+  if not Mai then Result := Result + ', uma letra maiuscula (A-Z)';
+  if not Num then Result := Result + ', um numero (0-9)';
+  if not Esp then Result := Result + ', um caractere especial (ex.: ! @ # $ %)';
+  if Result <> '' then Result := Copy(Result, 3, Length(Result));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -606,9 +630,9 @@ begin
       MsgBox('Informe um e-mail valido.', mbError, MB_OK);
       Result := False;
     end
-    else if Length(AdminPage.Values[3]) < 8 then
+    else if FaltasSenha(AdminPage.Values[3]) <> '' then
     begin
-      MsgBox('A senha precisa ter pelo menos 8 caracteres.', mbError, MB_OK);
+      MsgBox('A senha precisa ter ' + FaltasSenha(AdminPage.Values[3]) + '.', mbError, MB_OK);
       Result := False;
     end
     else if AdminPage.Values[3] <> AdminPage.Values[4] then
