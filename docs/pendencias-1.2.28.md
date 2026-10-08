@@ -116,3 +116,18 @@ Confirmar na próxima versão do Manual do Desenvolvedor (hoje v2.7, seção 8) 
 ## 13. Integração em PostgreSQL: `npm run test:integracao:pg`
 
 Roda `tests/integracao/*.test.ts` com `DB_TYPE=postgres` (o tipo das colunas de texto sai de `DB_TYPE` ao carregar; com o `DB_TYPE=mssql` do `.env` o PostgreSQL não monta as tabelas). Conexão por `PG_TESTE_HOST/PORT/DB/USER/PASSWORD` (banco com "teste" no nome) e `JWT_SECRET`; `CRS_TESTE_XML` com o caminho do `teste1mb.xml`. Ver o README do back, seção Testes. Observação: rodando de um worktree, o caminho padrão do `teste1mb.xml` não existe e o teste do CRS sai como skip — informe `CRS_TESTE_XML`.
+
+## 14. Sobras dos grupos A, D, D2, B e C (seção 9 do levantamento do manual)
+
+- **XML de PP na Importação:** a tela converte o XML de evtMovPP com a extração de OpFin antes de mandar ao servidor (levantamento, item 2). Ler o evtMovPP no servidor, como o OpFin.
+- **Configurações → Banco de Dados (banco dedicado):** confirmar se tem efeito no on-premise; se não, tirar da tela (item 6).
+- **Certificado digital:** conferir o CNPJ do certificado com o da empresa declarante antes de transmitir (item 12; cadeia ICP-Brasil e vencimento já conferidos no Grupo A).
+- **Pacote de diagnóstico:** botão na tela (hoje só `GET /api/configuracoes/diagnostico`) (item 14).
+- **Para o manual, a documentar ou verificar:** backup e restauração (com o DPAPI do `config\`), requisitos mínimos, procedimento de reinício do serviço, situação "Fechado" do período, "Lembrar-me" e "Esqueceu a senha?" no login, reimportação com `forcar=true`, vírgula decimal no CSV de OpFin, textos oficiais dos códigos MS e o e-mail de suporte (itens 15–17 e 19–25; ver também os itens 3, 5 e 6 desta lista).
+- **Migração:** premissas P1, P2 e P5–P12 sem prova na RFB (item 19).
+
+## 15. API de importação (Grupo C2) — limites conhecidos
+
+- Limites: 60 requisições/min por chave (pelo prefixo) e, para chave inválida, 20 tentativas/min por IP (acima: 429; `IMPORT_API_FALHAS_IP_MIN`). A chave é conferida antes: chave válida nunca é barrada pelo limite por IP. Os contadores ficam em memória (zeram ao reiniciar o serviço).
+- Tabelas `ChaveApi` (master) e `ImportacaoApi` (base): migrations testadas em PostgreSQL e SQL Server; Oracle sem teste real (item 8).
+- No histórico de importações e na Auditoria, o "usuário" das chamadas pela API é `chave:<prefixo>` (a tela não traduz para o nome da chave).
