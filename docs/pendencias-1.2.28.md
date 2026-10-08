@@ -102,3 +102,17 @@ Trocar o 16.4-1 (08/2024) pela correção mais nova da série 16 publicada pela 
 Renovar certificados de criptografia RFB: Produção vence em 25/11/2026, Produção Restrita em 23/12/2026; baixar os novos em http://sped.rfb.gov.br/pasta/show/2064 e distribuir.
 
 Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 30 dias). O "Testar Conectividade" mostra se a chave do servidor confere com o certificado em uso.
+
+## 11. Limpeza de dados de teste com CNPJ alfanumérico
+
+Confirmar na próxima versão do Manual do Desenvolvedor (hoje v2.7, seção 8) se o endpoint `limpezaDadosTesteProducaoRestrita` aceita CNPJ alfanumérico: o texto atual diz "somente números e sem formatação", anterior ao aviso da RFB de 29/04/2026 sobre o CNPJ alfanumérico (os XSDs v1_5_0 já aceitam `[0-9A-Z]{14}`). O sistema envia o CNPJ como está (maiúsculas e dígitos, sem pontuação); se a RFB devolver HTTP 400 para CNPJ com letras, a tela mostra a observação (`notaLimpezaCnpjAlfanumerico` em `routes/configuracoes.ts`). Se o manual novo pedir outra forma, ajustar `RfbService.limparDadosTesteProducaoRestrita`.
+
+## 12. 409 "importação em andamento" intermitente (achado no D2 — CORRIGIDO no back)
+
+**Causa (bug real, não isolamento de teste):** na importação síncrona a rota respondia ao cliente e só depois, no `finally` de `comArquivoTemporario` (`routes/importacao.ts`), esperava apagar o arquivo temporário para então liberar a vaga do cliente (`finalizarJob`). Quem manda a importação seguinte assim que recebe a resposta (o teste do gerador, um script, a API de importação) caía nessa janela e levava 409 sem haver importação nenhuma. Com a máquina folgada a janela é de milissegundos (12 rodadas seguidas do `geradorDadosTeste.mssql.test.ts` passaram); sob carga (suíte inteira) apareceu 1 vez. Não há trava presa entre processos: a vaga é em memória, por processo.
+
+**Correção:** a vaga é liberada antes de apagar o temporário (síncrona e assíncrona). Teste: `tests/importacaoVagaTenant.test.ts` atrasa a exclusão do temporário em 300 ms — sem a correção a 2ª importação leva 409; com ela, não — e confere que duas importações realmente simultâneas do mesmo cliente continuam com 409.
+
+## 13. Integração em PostgreSQL: `npm run test:integracao:pg`
+
+Roda `tests/integracao/*.test.ts` com `DB_TYPE=postgres` (o tipo das colunas de texto sai de `DB_TYPE` ao carregar; com o `DB_TYPE=mssql` do `.env` o PostgreSQL não monta as tabelas). Conexão por `PG_TESTE_HOST/PORT/DB/USER/PASSWORD` (banco com "teste" no nome) e `JWT_SECRET`; `CRS_TESTE_XML` com o caminho do `teste1mb.xml`. Ver o README do back, seção Testes. Observação: rodando de um worktree, o caminho padrão do `teste1mb.xml` não existe e o teste do CRS sai como skip — informe `CRS_TESTE_XML`.
