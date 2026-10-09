@@ -1,0 +1,18 @@
+# SHA-256 esperado de cada arquivo de installer\deps\ (deps\ não é versionado; este arquivo é).
+# O build.ps1 confere TODO arquivo de deps\ com esta lista, baixado agora ou já presente: hash diferente, ou arquivo
+# sem linha aqui, para o build com erro (arquivo, hash esperado e obtido) sem apagar nem baixar nada de novo.
+# Trocar a versão de uma dependência = trocar a linha dela (hash e origem) no mesmo commit.
+#
+# Formato: <sha256> <arquivo em deps\> <versão> <origem>
+#
+# postgresql-installer.exe  16.15-5: confere com o .sha256 e o .md5 publicados pela EnterpriseDB; assinatura
+#                           Authenticode válida (EnterpriseDB Corporation). Conferido em 09/10/2026.
+# node-v22.14.0-win-x64.zip conferido com o SHASUMS256.txt de nodejs.org/dist/v22.14.0.
+# WinSW-x64.exe             2.12.0: SEM checksum oficial — o projeto não publica soma, o GitHub não registra digest
+#                           para este anexo (de 2023) e o executável não é assinado. Hash do arquivo que já usamos
+#                           nos instaladores anteriores (tamanho 18243033 bytes, igual ao do anexo no GitHub); serve
+#                           para pegar troca ou corrupção, não prova a origem.
+
+4065dbc5ffb52010e7357dfd6a74934878f1c6faf7a75cad1411a22e11b7b929  postgresql-installer.exe   16.15-5  https://get.enterprisedb.com/postgresql/postgresql-16.15-5-windows-x64.exe
+55b639295920b219bb2acbcfa00f90393a2789095b7323f79475c9f34795f217  node-v22.14.0-win-x64.zip  22.14.0  https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip
+05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da  WinSW-x64.exe              2.12.0   https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe

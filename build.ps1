@@ -16,7 +16,9 @@
   o que for empacotado é o que roda no cliente.
 
   deps\ e stage\ NÃO são versionados: deps\ (zip do Node, WinSW, instalador do PostgreSQL) é baixado dos endereços
-  oficiais quando falta, e stage\ é recriado do zero a cada build. Só preparar deps\ (sem gerar nada):
+  oficiais quando falta, e stage\ é recriado do zero a cada build. Todo arquivo de deps\, baixado ou já presente, tem
+  o SHA-256 conferido com installer\deps.sha256 (versionado); não bate ou não está registrado = o build para.
+  Só preparar deps\ (sem gerar nada):
       powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SoDependencias [-SemPostgres]
 #>
 param(
@@ -26,8 +28,8 @@ param(
   [string]$FrontendDir    = "efinanceira-front",
   [string]$LicensePublicKey = "",   # PEM da chave PUBLICA (padrao: installer\license-public.pem) — so para conferir config\global-defaults.env
   [string]$NodeVersion    = "22.14.0",
-  [string]$PgInstallerUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64.exe",
-  [string]$WinSWUrl       = "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+  [string]$PgInstallerUrl = "",     # padrão: a origem registrada em deps.sha256 (outra exige registrar o hash dela)
+  [string]$WinSWUrl       = "",     # idem
   [switch]$SemPostgres,   # instalador sem PostgreSQL (so SQL Server ou Oracle existentes): nao baixa nem embute o PostgreSQL
   [switch]$SoDependencias # so baixa/confere deps\ e sai (nao exige back/front/Inno Setup, nao gera instalador)
 )
@@ -50,14 +52,58 @@ function Invoke-Checked {
   if ($LASTEXITCODE -ne 0) { throw "Falhou: $Exe $($ArgList -join ' ') (código $LASTEXITCODE)" }
 }
 
-# Dependência externa em deps\ (não versionada): usa a que já estiver lá; senão baixa do endereço oficial. Baixa para
-# <arquivo>.part e só renomeia no fim — antes um download interrompido deixava um arquivo pela metade que os builds
-# seguintes tratavam como "em cache". Sem internet: coloque o arquivo em deps\ à mão (README, "Dependências externas").
+# SHA-256 esperado de cada arquivo de deps\: installer\deps.sha256 (versionado; "<sha256> <arquivo> <versão> <origem>"
+# por linha). É a única fonte: trocar a versão de uma dependência = trocar a linha dela, hash e origem no mesmo commit.
+function Read-DepsSha256 {
+  param([string]$Caminho)
+  if (-not (Test-Path $Caminho)) { throw "Arquivo de hashes das dependências não encontrado: $Caminho" }
+  $registro = @{}
+  $n = 0
+  foreach ($linha in Get-Content $Caminho -Encoding UTF8) {
+    $n++
+    if ($linha -match '^\s*(#|$)') { continue }
+    $campos = -split $linha
+    if ($campos.Count -ne 4 -or $campos[0] -notmatch '^[0-9a-fA-F]{64}$') {
+      throw "$Caminho, linha ${n}: esperado `"<sha256> <arquivo> <versão> <origem>`", veio `"$linha`"."
+    }
+    if ($registro.ContainsKey($campos[1])) { throw "$Caminho, linha ${n}: $($campos[1]) registrado duas vezes." }
+    $registro[$campos[1]] = [pscustomobject]@{ Sha256 = $campos[0].ToLowerInvariant(); Versao = $campos[2]; Url = $campos[3] }
+  }
+  return $registro
+}
+
+# Confere o SHA-256 de um arquivo com o registrado. Não bate, ou não há registro: para o build. Nunca apaga o arquivo.
+function Assert-DepSha256 {
+  param([string]$Arquivo, [string]$Nome, [hashtable]$Registro)
+  if (-not $Registro.ContainsKey($Nome)) {
+    throw "Sem SHA-256 registrado para $Nome em deps.sha256: o build não usa dependência sem hash conferido."
+  }
+  $esperado = $Registro[$Nome].Sha256
+  $obtido = (Get-FileHash $Arquivo -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($obtido -ne $esperado) {
+    throw "SHA-256 de $Nome não confere.`n  arquivo:  $Arquivo`n  esperado: $esperado`n  obtido:   $obtido`n" +
+      "O arquivo não foi apagado nem baixado de novo. Confira de onde ele veio e substitua-o à mão; se a troca de " +
+      "versão for intencional, registre o hash e a origem novos em deps.sha256."
+  }
+  Write-Host "  SHA-256 conferido: $Nome ($($Registro[$Nome].Versao))"
+}
+
+# Dependência externa em deps\ (não versionada): usa a que já estiver lá; senão baixa da origem registrada. Nos dois
+# casos confere o SHA-256 com deps.sha256 antes de usar. Baixa para <arquivo>.part e só renomeia depois de conferido;
+# um download com hash errado fica como <arquivo>.rejeitado, para exame. Sem internet: coloque o arquivo em deps\ à
+# mão (README, "Dependências externas").
 function Get-Dep {
-  param([string]$Url, [string]$Dest, [string]$Sha256Url)
+  param([string]$Url, [string]$Dest, [hashtable]$Registro)
   $nome = Split-Path -Leaf $Dest
+  if (-not $Registro.ContainsKey($nome)) {
+    throw "Sem SHA-256 registrado para $nome em deps.sha256: o build não usa dependência sem hash conferido."
+  }
+  if ($Url -ne $Registro[$nome].Url) {
+    throw "A origem de $nome ($Url) não é a registrada em deps.sha256 ($($Registro[$nome].Url)). Para trocar de " +
+      "versão, registre a origem e o SHA-256 novos em deps.sha256."
+  }
   if (Test-Path $Dest) {
-    if ((Get-Item $Dest).Length -gt 0) { Write-Host "  em cache: $nome"; return }
+    if ((Get-Item $Dest).Length -gt 0) { Write-Host "  em cache: $nome"; Assert-DepSha256 $Dest $nome $Registro; return }
     Remove-Item $Dest -Force   # arquivo vazio de uma tentativa antiga
   }
   $parcial = "$Dest.part"
@@ -65,30 +111,30 @@ function Get-Dep {
   try {
     Invoke-WebRequest -Uri $Url -OutFile $parcial -UseBasicParsing
     if ((Get-Item $parcial).Length -eq 0) { throw 'o servidor devolveu um arquivo vazio' }
-    if ($Sha256Url) {   # soma oficial publicada junto do arquivo (ex.: SHASUMS256.txt do nodejs.org)
-      $somas = (Invoke-WebRequest -Uri $Sha256Url -UseBasicParsing).Content
-      $esperado = ([regex]::Match($somas, "(?m)^([0-9a-f]{64})\s+$([regex]::Escape($nome))\s*$")).Groups[1].Value
-      if (-not $esperado) { throw "$nome não consta em $Sha256Url" }
-      $obtido = (Get-FileHash $parcial -Algorithm SHA256).Hash.ToLowerInvariant()
-      if ($obtido -ne $esperado) { throw "SHA-256 não confere (esperado $esperado, obtido $obtido)" }
-      Write-Host "  SHA-256 conferido: $nome"
-    }
-    Move-Item $parcial $Dest -Force
   } catch {
     if (Test-Path $parcial) { Remove-Item $parcial -Force }
     throw "Não consegui obter $nome de $Url ($($_.Exception.Message)). Sem internet nesta máquina? Baixe o arquivo em " +
       "outra e coloque-o em $Dest (ver README, seção `"Dependências externas`")."
   }
+  try { Assert-DepSha256 $parcial $nome $Registro }
+  catch {
+    Move-Item $parcial "$Dest.rejeitado" -Force
+    throw "$($_.Exception.Message)`nO download ficou em $Dest.rejeitado."
+  }
+  Move-Item $parcial $Dest -Force
 }
 
 function Get-Dependencias {
-  Write-Host "==> Dependências externas (deps\)"
+  Write-Host "==> Dependências externas (deps\, conferidas com deps.sha256)"
   New-Item -ItemType Directory -Force -Path $Deps | Out-Null
-  Get-Dep "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" (Join-Path $Deps "node-v$NodeVersion-win-x64.zip") `
-    "https://nodejs.org/dist/v$NodeVersion/SHASUMS256.txt"
-  Get-Dep $WinSWUrl (Join-Path $Deps 'WinSW-x64.exe')
-  if (-not $SemPostgres) { Get-Dep $PgInstallerUrl (Join-Path $Deps 'postgresql-installer.exe') }
+  Get-Dep "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" (Join-Path $Deps "node-v$NodeVersion-win-x64.zip") $DepsSha256
+  Get-Dep $WinSWUrl (Join-Path $Deps 'WinSW-x64.exe') $DepsSha256
+  if (-not $SemPostgres) { Get-Dep $PgInstallerUrl (Join-Path $Deps 'postgresql-installer.exe') $DepsSha256 }
 }
+
+$DepsSha256 = Read-DepsSha256 (Join-Path $Installer 'deps.sha256')
+if (-not $WinSWUrl)       { $WinSWUrl       = $DepsSha256['WinSW-x64.exe'].Url }
+if (-not $PgInstallerUrl) { $PgInstallerUrl = $DepsSha256['postgresql-installer.exe'].Url }
 
 # Só prepara deps\ (máquina sem internet, ou conferir antes do build): não exige back/front/Inno Setup nem gera nada
 if ($SoDependencias) { Get-Dependencias; Write-Host "deps\ pronta: $Deps" -ForegroundColor Green; exit 0 }

@@ -97,6 +97,8 @@ executada no PostgreSQL e no SQL Server — não havia Oracle disponível.
 
 Trocar o 16.4-1 (08/2024) pela correção mais nova da série 16 publicada pela EnterpriseDB (há até a 16.12-1; `-PgInstallerUrl` no `build.ps1`), testando instalação nova e atualização.
 
+**Feito no build (1.2.28):** o padrão passou a ser o 16.15-5, registrado em `deps.sha256` com o SHA-256 conferido com o publicado pela EnterpriseDB. O `build.ps1` confere o SHA-256 do PostgreSQL, do Node e do WinSW sempre, inclusive do arquivo já presente em `deps\` (antes reaproveitava pelo nome e só conferia o Node, e só ao baixar); teste em `tools\testar-deps-sha256.ps1`. **Falta:** testar instalação nova e atualização com o 16.15-5.
+
 ## 10. Certificados de criptografia da RFB
 
 Renovar certificados de criptografia RFB: Produção vence em 25/11/2026, Produção Restrita em 23/12/2026; baixar os novos em http://sped.rfb.gov.br/pasta/show/2064 e distribuir.

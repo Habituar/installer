@@ -47,11 +47,13 @@ Resultado: `installer\output\efinanceira-onpremise-1.0.0-setup.exe`.
 
 | Arquivo em `deps\` | Origem (parâmetro do `build.ps1`) | Quando é usado |
 |---|---|---|
-| `node-v22.14.0-win-x64.zip` | `https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip` (`-NodeVersion`); SHA-256 conferido com o `SHASUMS256.txt` oficial | sempre (Node embutido) |
+| `node-v22.14.0-win-x64.zip` | `https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip` (`-NodeVersion`) | sempre (Node embutido) |
 | `WinSW-x64.exe` | `https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe` (`-WinSWUrl`) | sempre (serviço do Windows) |
-| `postgresql-installer.exe` | `https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64.exe` (`-PgInstallerUrl`) | só no instalador **com** PostgreSQL (não com `-SemPostgres`) |
+| `postgresql-installer.exe` | `https://get.enterprisedb.com/postgresql/postgresql-16.15-5-windows-x64.exe` (`-PgInstallerUrl`) | só no instalador **com** PostgreSQL (não com `-SemPostgres`) |
 
-**Máquina de build sem internet:** baixe os arquivos acima em outra máquina, com **exatamente esses nomes**, e coloque-os em `installer\deps\` antes do build. Para só preparar ou conferir a pasta, sem exigir back/front/Inno Setup e sem gerar instalador:
+**SHA-256 conferido sempre:** o hash esperado de cada arquivo fica em `installer\deps.sha256` (versionado), com a versão e a origem. O `build.ps1` confere todo arquivo de `deps\`, baixado agora ou já presente. Se o hash não bate, ou o arquivo não tem linha em `deps.sha256`, o build para mostrando o arquivo, o hash esperado e o obtido; não apaga o arquivo nem baixa de novo (um download com hash errado fica como `<arquivo>.rejeitado`). Sem `-WinSWUrl`/`-PgInstallerUrl`, a origem é a registrada; outra origem só é aceita depois de registrar o hash dela. Trocar a versão de uma dependência = trocar a linha dela em `deps.sha256` (hash e origem) no mesmo commit. O WinSW não tem checksum oficial publicado: o hash registrado é o do arquivo já usado nos instaladores anteriores. Teste: `tools\testar-deps-sha256.ps1` (com `-Deps <pasta>`, confere também os arquivos de uma pasta `deps\`).
+
+**Máquina de build sem internet:** baixe os arquivos acima em outra máquina, com **exatamente esses nomes**, e coloque-os em `installer\deps\` antes do build (o SHA-256 é conferido do mesmo jeito). Para só preparar ou conferir a pasta, sem exigir back/front/Inno Setup e sem gerar instalador:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SoDependencias              # os três
