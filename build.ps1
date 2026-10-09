@@ -237,7 +237,8 @@ try {
     $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (Resolve-Path $caminho).Path
     $dias = [int]($x509.NotAfter - (Get-Date)).TotalDays
     if ($dias -le 0) { throw "Certificado de criptografia da RFB VENCIDO no build: $cer (venceu em $($x509.NotAfter.ToString('dd/MM/yyyy'))). Baixe o novo em http://sped.rfb.gov.br/pasta/show/2064." }
-    if ($dias -le 30) { Write-Warning "$cer vence em $dias dia(s) ($($x509.NotAfter.ToString('dd/MM/yyyy'))): troque pelo novo do portal SPED." }
+    # 45 dias: o mesmo aviso da aba Certificados da RFB e do Testar Conectividade (DIAS_AVISO_CERT_CRIPTOGRAFIA no back)
+    if ($dias -le 45) { Write-Warning "$cer vence em $dias dia(s) ($($x509.NotAfter.ToString('dd/MM/yyyy'))): troque pelo novo do portal SPED." }
     else { Write-Host "    $cer ok (vence em $($x509.NotAfter.ToString('dd/MM/yyyy')), SHA-1 $($x509.Thumbprint))" }
   }
   Copy-Item dist "$Stage\backend\dist" -Recurse

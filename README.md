@@ -85,7 +85,7 @@ Pastas no cliente (`C:\Program Files\eFinanceira` por padrão):
 - `config\rfb\`: certificados **públicos** da RFB para criptografia de lotes, um por ambiente
   (`cert-criptografia-producao.cer` e `cert-criptografia-producao-restrita.cer`). Vêm do pacote do backend
   (`src\recursos\rfb`, baixados de http://sped.rfb.gov.br/pasta/show/2064). Vencem uma vez por ano: o Administrador
-  renova em Configurações > Certificados da RFB (ou trocando o arquivo da pasta), sem reinstalar; a tela avisa 30 dias
+  renova em Configurações > Certificados da RFB (ou trocando o arquivo da pasta), sem reinstalar; a tela (e o `build.ps1`) avisa 45 dias
   antes. Uma atualização do instalador só troca o arquivo da pasta por um do pacote que vença **depois**.
   Teste da instalação desses arquivos: `tools\testar-certificados-rfb.ps1`.
 - `logs\`: `install.log` e logs do serviço

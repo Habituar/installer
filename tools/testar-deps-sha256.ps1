@@ -93,6 +93,8 @@ Confere (Test-ChavePublicaConfere ($pemLf -replace "`n", "`r`n") $b64) 'license-
 Confere (-not (Test-ChavePublicaConfere ($pemLf -replace 'A', 'B') $b64)) 'outra chave: não confere'
 $pemRepo = Join-Path $PSScriptRoot '..\license-public.pem'
 if (Test-Path $pemRepo) { Confere (Test-ChavePublicaConfere (Get-Content $pemRepo -Raw) $b64) 'license-public.pem deste checkout confere' }
+$fonteBuild = Get-Content (Join-Path $PSScriptRoot '..\build.ps1') -Raw
+Confere ($fonteBuild -match '\$dias -le 45\) \{ Write-Warning' -and $fonteBuild -notmatch '\$dias -le 30\)') 'build.ps1 avisa a 45 dias do vencimento dos certificados de criptografia (como a tela)'
 $attr = & git -C (Join-Path $PSScriptRoot '..') check-attr text -- license-public.pem 2>$null
 Confere ($attr -match 'text: unset') '.gitattributes: license-public.pem sem conversão de quebra de linha (-text)'
 
