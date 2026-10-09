@@ -13,7 +13,7 @@ instalador e `index.html` sem cache). As seções abaixo descrevem cada item com
 | 3 | Redefinir senha do administrador | **Feito:** atalho "Redefinir senha do administrador" (exige administrador do Windows, confirmação SIM; senha só na tela; Auditoria `servidor:<usuário>`). Testado só no banco descartável | back `scripts/redefinirSenhaAdmin.ts`; installer `scripts\redefinir-senha-admin.ps1`; `redefinicaoSenhaAdmin.test.ts`, `tools\testar-redefinir-senha-admin.ps1` |
 | 4 | Login | **Feito:** instalador aceita maiúsculas e e-mail igual ao informado, diz o caractere e a posição; servidor compara `LOWER(login)` nos 3 bancos e recusa logins que só diferem na caixa (409 `LOGIN_AMBIGUO`). Oracle sem teste real (item 8) | back `lib/loginCaixa.ts`; testes em SQL Server e PostgreSQL (`loginCaixa.integracao.test.ts`) |
 | 5 | Textos de senha | **Feito:** "Esqueceu a senha?" do on-premise com o procedimento real e o atalho do item 3 | front `utils/contatoSuporte.ts` |
-| 6 | `SUPORTE_CONTATO` | **Feito:** `chamados.cfi@zapsistemas.com.br` em `global-defaults.env` (a atualização também recebe), `GET /api/suporte` público, as 4 telas e as 3 mensagens de `modoLeitura.ts` | `contatoSuporte.test.ts` (back e front), `tools\testar-postinstall-config.ps1` |
+| 6 | `SUPORTE_CONTATO` | **Feito:** `chamados.cfi@zapsistemas.com.br` em `global-defaults.env` (a atualização também recebe), `GET /api/suporte` público, as 4 telas e as 3 mensagens de `modoLeitura.ts`. **Corrigido depois (item 18):** a tela chamava `/suporte` sem `/api` e o contato não aparecia | `contatoSuporte.test.ts` (back e front), `tools\testar-postinstall-config.ps1` |
 | 7 | Deadlock na limpeza dos testes | **1.2.29** (integração segue em série) | |
 | 8 | Oracle sem teste real | **1.2.29** | |
 | 9 | PostgreSQL 16.15-5 | **Feito no build** (`deps.sha256`, SHA-256 sempre conferido). **Falta:** instalação nova com o PostgreSQL embutido numa VM, com o instalador final | `tools\testar-deps-sha256.ps1` |
@@ -24,6 +24,8 @@ instalador e `index.html` sem cache). As seções abaixo descrevem cada item com
 | 15 | API de importação, limites | **1.2.29** (documentado) | |
 | 16 | "Criptografia NÃO confere" no Testar Conectividade | **Corrigido:** a comparação TLS x certificado de criptografia foi retirada (são certificados diferentes por desenho); a tela mostra o certificado TLS (emissor, validade) e o vencimento dos certificados de criptografia em uso, com alerta a 45 dias ou menos | seção 16; `conectividadeRfb.test.ts`, front `vencimentoCriptografia.test.ts` |
 | 17 | Checkout limpo do installer não gerava o pacote | **Corrigido:** `.gitattributes` (`license-public.pem -text`) e o `build.ps1` compara o PEM com as quebras de linha normalizadas | seção 17; `tools\testar-deps-sha256.ps1` |
+| 18 | Contato de suporte não aparecia na 1.2.28 instalada | **Corrigido:** o front chamava `/suporte` em vez de `/api/suporte` (caía no `index.html`) | seção 18; front `contatoSuporte.test.ts` |
+| 19 | Aviso de vencimento dos certificados da RFB | **Feito:** 45 dias em todos os lugares (aba Certificados da RFB, Testar Conectividade e `build.ps1`; antes era 30 na aba e no build) | `enderecosCertificadosRfb.test.ts`, `tools\testar-deps-sha256.ps1` |
 
 ## 1. Detecção de banco existente antes de pedir o administrador
 
@@ -124,14 +126,13 @@ Trocar o 16.4-1 (08/2024) pela correção mais nova da série 16 publicada pela 
 
 Renovar certificados de criptografia RFB: Produção vence em 25/11/2026, Produção Restrita em 23/12/2026; baixar os novos em http://sped.rfb.gov.br/pasta/show/2064 e distribuir.
 
-Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 30 dias). O "Testar Conectividade" mostra o vencimento dos certificados de criptografia em uso, com alerta a 45 dias ou menos (não os compara com o certificado TLS do servidor — ver item 16).
+Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 45 dias). O "Testar Conectividade" mostra o vencimento dos certificados de criptografia em uso, com alerta a 45 dias ou menos (não os compara com o certificado TLS do servidor — ver item 16).
 
 **Verificado em 09/10/2026 (1.2.28): ainda não há certificados novos.** A página do SPED (pasta 2064) publica só os
 mesmos do pacote — Produção "Certificado efinanceira (Ambiente de Produção)_2025", validade até 25/11/2026, thumbprint
 `33ff3179bda29a7e25daa52631defc19d1105b2d`; Produção Restrita, validade 23/12/2025 a 23/12/2026, thumbprint
 `cc242988a739caa7757b29e2a900ae35519cdb39` — iguais aos de `efinanceira-back/src/recursos/rfb/`. Nada foi trocado na
-1.2.28. **Continua pendente:** conferir a página de novo antes de 25/11/2026 (o build avisa a 30 dias, a partir de
-26/10/2026) e, quando publicarem, distribuir pela tela de Configurações e trocar os arquivos do pacote.
+1.2.28. **Continua pendente:** conferir a página de novo antes de 25/11/2026 (o build avisa a 45 dias, a partir de 11/10/2026) e, quando publicarem, distribuir pela tela de Configurações e trocar os arquivos do pacote.
 
 ## 11. Limpeza de dados de teste com CNPJ alfanumérico
 
@@ -182,7 +183,7 @@ front `ResultadoTesteRfb.tsx`). A chave `RFB_VERIFICAR_CERTIFICADO_SERVIDOR` con
 cadeia TLS da transmissão; nunca teve efeito sobre a criptografia (teste com a chave ligada e desligada). A tela mantém
 DNS/TCP/TLS e o certificado TLS do servidor (emissor e validade) e passa a mostrar o vencimento dos certificados de
 criptografia em uso nos dois ambientes, com alerta a 45 dias ou menos (`vencimentosCriptografiaRfb`). A aba
-Certificados da RFB e o `build.ps1` continuam avisando a 30 dias.
+Certificados da RFB e o `build.ps1` passaram a avisar também a 45 dias (item 19).
 
 ## 17. Checkout limpo do installer não gerava o pacote (CORRIGIDO na 1.2.28)
 
@@ -190,3 +191,30 @@ O `license-public.pem` é versionado com LF; com `core.autocrlf=true` o checkout
 comparava os bytes com `LICENSE_PUBLIC_KEY_B64`, parava ("não bate") com a mesma chave. Correção: `.gitattributes`
 (`license-public.pem -text`) e a comparação do `build.ps1` normaliza as quebras de linha (`Test-ChavePublicaConfere`).
 Teste: `tools\testar-deps-sha256.ps1`.
+
+## 18. Contato de suporte não aparecia na 1.2.28 instalada (CORRIGIDO na 1.2.28)
+
+**Sintoma:** atualização da 1.2.27 para a 1.2.28 com `SUPORTE_CONTATO=chamados.cfi@zapsistemas.com.br` no
+`backend.env` e no `global-defaults.env`, serviço reiniciado, `/health` em 1.2.28 — e o rodapé do login sem
+"Suporte:", e o "Esqueceu a senha?" sem o contato.
+
+**Causa:** o front (`hooks/useContatoSuporte.ts`, item 6) chamava `${baseURL}/suporte`, sem `/api`. No on-premise o
+`baseURL` é `''` (mesma origem) e todas as outras chamadas já trazem `/api/...`; `/suporte` caía no fallback da SPA
+(`app.get(/^\/(?!api\/|health).*/)`), que responde **200 com o `index.html`** — sem o campo `contato`, a tela tratava
+como "sem contato". A rota do back estava certa: `GET /api/suporte` é pública e devolve
+`{"sucesso":true,"contato":"chamados.cfi@zapsistemas.com.br"}` (conferido num back de teste descartável com a mesma
+variável; `/suporte` no mesmo back devolveu `text/html`). Não havia service worker nem cache: o `index.html` vai com
+`no-store`. O teste do item 6 cobria só a função que escolhe o contato, não o endereço chamado. As 3 mensagens de
+`modoLeitura.ts` (licença suspensa/cancelada/modo leitura) vêm do servidor e já saíam com o contato.
+
+**Correção:** a rota numa constante (`ROTA_CONTATO_SUPORTE = '/api/suporte'`, `utils/contatoSuporte.ts`); resposta
+que não é o JSON da API não fica guardada como "sem contato". Afeta as 4 telas que usam o contato: rodapé do login,
+"Esqueceu a senha?", faixa de licença suspensa e conta cancelada. Testes (front `contatoSuporte.test.ts`): a rota
+chamada é `/api/suporte`, e nenhuma chamada `${baseURL}/...` do front sai de `/api/...` ou `/health` — os dois falham
+com o código anterior.
+
+## 19. Aviso de vencimento dos certificados da RFB: 45 dias em todos os lugares (FEITO na 1.2.28)
+
+`DIAS_AVISO_CERT_CRIPTOGRAFIA` = 45 (back, `services/certificadoCriptografiaRfb.ts`) vale para a aba Certificados da
+RFB e para o Testar Conectividade (mesma constante); o `build.ps1` avisa também a 45 dias (só aviso; vencido continua
+parando o build). O certificado digital do CLIENTE (A1) continua avisando a 30 dias — é outro prazo, não mudou.
