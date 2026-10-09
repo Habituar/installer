@@ -105,6 +105,13 @@ Renovar certificados de criptografia RFB: Produção vence em 25/11/2026, Produ�
 
 Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 30 dias). O "Testar Conectividade" mostra se a chave do servidor confere com o certificado em uso.
 
+**Verificado em 09/10/2026 (1.2.28): ainda não há certificados novos.** A página do SPED (pasta 2064) publica só os
+mesmos do pacote — Produção "Certificado efinanceira (Ambiente de Produção)_2025", validade até 25/11/2026, thumbprint
+`33ff3179bda29a7e25daa52631defc19d1105b2d`; Produção Restrita, validade 23/12/2025 a 23/12/2026, thumbprint
+`cc242988a739caa7757b29e2a900ae35519cdb39` — iguais aos de `efinanceira-back/src/recursos/rfb/`. Nada foi trocado na
+1.2.28. **Continua pendente:** conferir a página de novo antes de 25/11/2026 (o build avisa a 30 dias, a partir de
+26/10/2026) e, quando publicarem, distribuir pela tela de Configurações e trocar os arquivos do pacote.
+
 ## 11. Limpeza de dados de teste com CNPJ alfanumérico
 
 Confirmar na próxima versão do Manual do Desenvolvedor (hoje v2.7, seção 8) se o endpoint `limpezaDadosTesteProducaoRestrita` aceita CNPJ alfanumérico: o texto atual diz "somente números e sem formatação", anterior ao aviso da RFB de 29/04/2026 sobre o CNPJ alfanumérico (os XSDs v1_5_0 já aceitam `[0-9A-Z]{14}`). O sistema envia o CNPJ como está (maiúsculas e dígitos, sem pontuação); se a RFB devolver HTTP 400 para CNPJ com letras, a tela mostra a observação (`notaLimpezaCnpjAlfanumerico` em `routes/configuracoes.ts`). Se o manual novo pedir outra forma, ajustar `RfbService.limparDadosTesteProducaoRestrita`.
