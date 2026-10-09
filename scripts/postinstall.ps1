@@ -2,8 +2,12 @@
   Executado pelo instalador depois que os arquivos foram copiados.
   Instalação nova : (opcional) instala PostgreSQL, cria banco/usuário, gera segredos, cria as tabelas,
                     cria o Cliente (CNPJ) + administrador, registra e sobe o serviço.
-  Atualização     : (config\backend.env já existe) atualiza o serviço existente no lugar (sem recriá-lo) e
-                    reaplica a configuração de boot; o backend aplica as migrations novas sozinho ao iniciar.
+  Atualização     : (config\backend.env e o marcador config\instalacao.json, ou — instalação anterior à 1.2.28 — o
+                    serviço registrado) atualiza o serviço existente no lugar (sem recriá-lo) e reaplica a
+                    configuração de boot; o backend aplica as migrations novas sozinho ao iniciar.
+  Incompleta      : (backend.env sem marcador e sem serviço: instalação nova que falhou no meio) mantém o backend.env
+                    (banco e segredos), cria instituição e administrador, registra e sobe o serviço.
+  O marcador só é gravado no fim de uma execução bem-sucedida (Get-ModoInstalacao, Write-MarcadorInstalacao).
   Log: <app>\logs\install.log
   Falha: <app>\logs\install-erro.txt — linha útil do erro + etapa, mostrada na tela de falha do instalador.
 #>
@@ -17,6 +21,7 @@ New-Item -ItemType Directory -Force -Path $ConfigDir, $LogDir | Out-Null
 Start-Transcript -Path (Join-Path $LogDir 'install.log') -Append | Out-Null
 
 $ParamsFile = Join-Path $ConfigDir 'install-params.json'
+$MarcadorFile = Join-Path $ConfigDir 'instalacao.json'   # gravado só no fim de uma instalação/atualização concluída
 $EnvFile    = Join-Path $ConfigDir 'backend.env'
 $GlobalsFile = Join-Path $ConfigDir 'global-defaults.env'   # valores fixos de toda instalação (vem do build)
 $Node      = Join-Path $App 'node\node.exe'
@@ -185,6 +190,36 @@ function Merge-GlobalDefaults {
     elseif ($linhas[$idx] -ne $g) { $linhas[$idx] = $g; $mudou = $true; Write-Host "global-defaults: $key atualizado no backend.env." }
   }
   return @{ Linhas = $linhas; Mudou = $mudou }
+}
+
+# Estado da pasta (item 2 das pendências 1.2.28) — mesma regra de ClassificarInstalacao (codigo-comum.iss):
+#   nova        = sem backend.env;
+#   atualizacao = backend.env e marcador (config\instalacao.json), ou — instalação anterior à 1.2.28, sem marcador —
+#                 o serviço registrado;
+#   incompleta  = backend.env sem marcador e sem serviço (instalação nova que falhou no meio): reaproveita o backend.env.
+# Teste: tools\testar-postinstall-config.ps1.
+function Get-ModoInstalacao {
+  param([bool]$TemBackendEnv, [bool]$TemMarcador, [bool]$TemServico)
+  if (-not $TemBackendEnv) { return 'nova' }
+  if ($TemMarcador -or $TemServico) { return 'atualizacao' }
+  return 'incompleta'
+}
+
+# O instalador manda no install-params.json o modo que mostrou ao usuário (as páginas que pediu). Divergiu do que
+# está no disco: para antes de mexer na configuração.
+function Assert-ModoConfere {
+  param([string]$Modo, [string]$ModoInstalador)
+  if ($ModoInstalador -and $ModoInstalador -ne $Modo) {
+    throw "O instalador tratou esta pasta como '$ModoInstalador', mas o estado dela agora é '$Modo'. A configuração não foi alterada; rode o instalador de novo."
+  }
+}
+
+function Write-MarcadorInstalacao {
+  param([string]$Arquivo, [string]$Modo, [string]$VersaoJson)
+  $versao = 'desconhecida'
+  try { $versao = (Get-Content $VersaoJson -Raw | ConvertFrom-Json).versao } catch { }
+  $json = [ordered]@{ versao = $versao; modo = $Modo; concluidaEm = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($Arquivo, $json, (New-Object Text.UTF8Encoding $false))
 }
 
 function Wait-Port {
@@ -480,13 +515,22 @@ function Write-ServicoConfig {
 }
 
 try {
-  $Fresh = -not (Test-Path $EnvFile)
+  # Estado da pasta (item 2 das pendências 1.2.28): nova, atualização ou incompleta — a mesma regra do instalador
+  # (codigo-comum.iss, ClassificarInstalacao). Só "nova" grava um backend.env novo, e "nova" só existe sem backend.env.
+  $P = $null
+  if (Test-Path $ParamsFile) {
+    $P = Get-Content $ParamsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    Restrict-Acl $ParamsFile   # contém senhas em texto puro até ser apagado no finally
+  }
+  $Modo = Get-ModoInstalacao (Test-Path $EnvFile) (Test-Path $MarcadorFile) ([bool](Get-Service $SvcName -ErrorAction SilentlyContinue))
+  Write-Host "Modo: $Modo (instalador: $(if ($P -and $P.modo) { $P.modo } else { 'não informado' }))"
+  Assert-ModoConfere $Modo $(if ($P) { $P.modo } else { $null })
+  $Fresh = $Modo -eq 'nova'
+  $CriaAdmin = $Modo -ne 'atualizacao'   # nova, ou incompleta (a anterior falhou antes de concluir)
 
   # ------------------------------------------------------------------ instalação nova
   if ($Fresh) {
-    if (-not (Test-Path $ParamsFile)) { throw "Arquivo de parâmetros do instalador não encontrado." }
-    $P = Get-Content $ParamsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    Restrict-Acl $ParamsFile   # contém a senha do banco em texto puro até ser apagado no finally
+    if (-not $P) { throw "Arquivo de parâmetros do instalador não encontrado." }
 
     if ($P.dbMode -eq 'embedded') {
       $script:Etapa = 'Instalação do PostgreSQL embutido e criação do banco'
@@ -573,6 +617,9 @@ try {
     $envLines += $globalLines   # públicos/fixos: texto puro, sem Protect-Secret
     if ($dbType -eq 'oracle') { $envLines += "DB_SERVICE_NAME=$(Protect-Secret $dbName)" }
     if ($dbType -eq 'mssql')  { $envLines += 'DB_ENCRYPT=true'; $envLines += 'DB_TRUST_CERT=true' }   # servidores internos costumam ter certificado próprio
+    # Trava final: um backend.env existente NUNCA é sobrescrito (segredos e ENCRYPTION_KEY novos deixariam ilegíveis
+    # o certificado e as senhas já cifrados)
+    if (Test-Path $EnvFile) { throw "config\backend.env já existe e não será recriado (modo $Modo). Nada foi alterado na configuração." }
     Set-Content -Path $EnvFile -Value $envLines -Encoding UTF8
     Restrict-Acl $EnvFile
   }
@@ -607,8 +654,10 @@ try {
   Import-EnvFile $EnvFile
   $HttpPort = [int]$env:PORT
 
-  # ------------------------------------------------------------------ tabelas + Cliente + administrador (só instalação nova)
-  if ($Fresh) {
+  # ------------------------------------------------------------------ tabelas + Cliente + administrador (instalação nova
+  # ou incompleta — nesta, com o banco do backend.env que ficou)
+  if ($CriaAdmin) {
+    if (-not $P) { throw "Arquivo de parâmetros do instalador não encontrado." }
     $script:Etapa = 'Criação das tabelas, da instituição e do administrador'
     Push-Location $BackendDir
     try {
@@ -718,7 +767,7 @@ $dep
   Invoke-Checked $svcExe @('start')
 
   # ------------------------------------------------------------------ firewall e atalho
-  if ($Fresh -and $P.firewall) {
+  if ($CriaAdmin -and $P.firewall) {
     Get-NetFirewallRule -DisplayName 'e-Financeira' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName 'e-Financeira' -Direction Inbound -Protocol TCP -LocalPort $HttpPort -Action Allow | Out-Null
   }
@@ -730,6 +779,10 @@ $dep
     throw "O serviço foi iniciado, mas a porta $HttpPort não respondeu. Veja os logs em $LogDir."
   }
   Write-Host "e-Financeira no ar: http://localhost:$HttpPort"
+  # Marcador de instalação concluída (item 2): só aqui, no fim de tudo. Sem ele (e sem o serviço), a próxima execução
+  # do instalador trata a pasta como instalação incompleta. Falhar aqui não desfaz nada: o serviço já está registrado.
+  try { Write-MarcadorInstalacao $MarcadorFile $Modo (Join-Path $BackendDir 'versao.json') }
+  catch { Write-Host "Aviso: não consegui gravar $MarcadorFile ($($_.Exception.Message))." }
   exit 0
 }
 catch {

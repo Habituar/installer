@@ -73,6 +73,8 @@ var
   FormatandoCnpj: Boolean;      { evita reentrar no OnChange ao reescrever o Text }
   BackupPage: TInputOptionWizardPage; { atualizacao: confirmacao obrigatoria do backup do banco }
   AvisoInstalacao: String;      { logs\install-aviso.txt: banco ja configurado, administrador nao criado (item 1) }
+  EstadoCongelado: Integer;     { EstadoInstalacao fixado no PrepareToInstall; -1 = ainda nao }
+  AvisouIncompleta: Boolean;    { mensagem de instalacao incompleta ja mostrada }
 
 const
   ColorNeutralBg = $00F5F5F5;   { cinza bem claro: em andamento }
@@ -84,9 +86,35 @@ const
   ColorErrBar  = $004747E5;
   ColorErrText = $002424C9;
 
+{ Codigo compartilhado com os testes do instalador (tools\testar-codigo-instalador.iss): estado da instalacao, login
+  do administrador, avisos e mensagens de falha. Incluido antes de tudo que o usa. }
+#include "codigo-comum.iss"
+
+{ Estado da pasta escolhida (codigo-comum.iss, ClassificarInstalacao). Antes: "atualizacao" = backend.env existe, e
+  uma instalacao nova que falhou depois de gravar o backend.env virava "atualizacao" e nunca criava o administrador. }
+function EstadoInstalacao: Integer;
+begin
+  { Congelado no inicio da instalacao (PrepareToInstall): depois dela o postinstall grava o marcador e o servico, e
+    uma instalacao nova passaria a parecer atualizacao na pagina final. Antes disso, vale a pasta escolhida agora. }
+  if EstadoCongelado >= 0 then
+  begin
+    Result := EstadoCongelado;
+    Exit;
+  end;
+  Result := ClassificarInstalacao(
+    FileExists(WizardDirValue + '\config\backend.env'),
+    FileExists(WizardDirValue + '\config\instalacao.json'),
+    RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\{#ServiceName}'));
+end;
+
 function IsUpgrade: Boolean;
 begin
-  Result := FileExists(WizardDirValue + '\config\backend.env');
+  Result := EstadoInstalacao = INSTALACAO_ATUALIZACAO;
+end;
+
+function IsIncompleta: Boolean;
+begin
+  Result := EstadoInstalacao = INSTALACAO_INCOMPLETA;
 end;
 
 { Tipo escolhido: 0 = PostgreSQL embutido, 1 = PostgreSQL existente, 2 = SQL Server, 3 = Oracle }
@@ -117,7 +145,7 @@ end;
 
 function NeedPgInstaller: Boolean;
 begin
-  Result := (not IsUpgrade) and IsEmbedded;
+  Result := (EstadoInstalacao = INSTALACAO_NOVA) and IsEmbedded;
 end;
 
 { Escapa para dentro de uma string PowerShell entre aspas duplas: crase, aspas e $ (que senao
@@ -129,9 +157,6 @@ begin
   StringChangeEx(S, '$', '`$', True);
   Result := S;
 end;
-
-{ Utf8Decode, LerResumoErroInstalacao e MensagemFalhaConfiguracao: codigo compartilhado com os testes do instalador }
-#include "codigo-comum.iss"
 
 { Testa a conexao com os dados preenchidos na pagina "Conexao com o banco de dados".
   SQL Server: login de verdade (System.Data.SqlClient, que ja vem no Windows) — confirma
@@ -372,6 +397,8 @@ end;
 
 procedure InitializeWizard;
 begin
+  EstadoCongelado := -1;
+  AvisouIncompleta := False;
   DbModePage := CreateInputOptionPage(wpSelectDir, 'Banco de dados',
     'Onde ficara o banco de dados do e-Financeira?',
     'Escolha uma das opcoes abaixo.', True, False);
@@ -515,12 +542,16 @@ begin
   Result := False;
   if PageID = BackupPage.ID then
   begin
-    Result := not IsUpgrade; { instalacao nova: nao ha banco para guardar }
+    Result := not IsUpgrade; { instalacao nova ou incompleta: nao ha dados para guardar }
     Exit;
   end;
   { Em atualizacao, nada e perguntado: config e banco existentes sao mantidos }
   if IsUpgrade and ((PageID = DbModePage.ID) or (PageID = DbConnPage.ID) or (PageID = TestPage.ID) or
                     (PageID = AppPage.ID) or (PageID = ClientePage.ID) or (PageID = AdminPage.ID)) then
+    Result := True
+  { Instalacao incompleta: banco e porta vem do backend.env que ficou; so instituicao e administrador }
+  else if IsIncompleta and ((PageID = DbModePage.ID) or (PageID = DbConnPage.ID) or (PageID = TestPage.ID) or
+                            (PageID = AppPage.ID)) then
     Result := True
   else if (PageID = DbConnPage.ID) or (PageID = TestPage.ID) then
     Result := IsEmbedded;
@@ -671,6 +702,12 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   Porta, Url, Msg: String;
 begin
+  { Instalacao incompleta (item 2): explica, uma vez, por que so instituicao e administrador sao pedidos }
+  if (CurPageID = ClientePage.ID) and IsIncompleta and (not AvisouIncompleta) then
+  begin
+    AvisouIncompleta := True;
+    SuppressibleMsgBox(MensagemInstalacaoIncompleta(WizardDirValue), mbInformation, MB_OK, IDOK);
+  end;
   if CurPageID <> wpFinished then Exit;
 
   Porta := GetInstalledPort;
@@ -707,6 +744,8 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   RC: Integer;
 begin
+  EstadoCongelado := -1;
+  EstadoCongelado := EstadoInstalacao; { daqui em diante o estado nao muda (ver EstadoInstalacao) }
   { Atualizacao: para o servico para liberar os arquivos }
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, RC);
   Sleep(4000);
@@ -748,6 +787,7 @@ begin
   ForceDirectories(ExpandConstant('{app}\config'));
   SetArrayLength(Lines, 1);
   Lines[0] := '{' +
+    '"modo":"' + NomeModoInstalacao(EstadoInstalacao) + '",' +
     '"dbMode":"' + Mode + '",' +
     '"dbType":"' + DbTypeValue + '",' +
     '"pgInstaller":"' + J(ExpandConstant('{tmp}\postgresql-installer.exe')) + '",' +

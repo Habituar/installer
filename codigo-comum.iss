@@ -76,6 +76,50 @@ begin
     Result := Trim(Utf8Decode(Bruto));
 end;
 
+{ Estado da pasta de instalacao (item 2 das pendencias 1.2.28). O config\instalacao.json (marcador) so e gravado
+  pelo postinstall.ps1 no FIM de uma instalacao ou atualizacao bem-sucedida.
+  - NOVA:        sem config\backend.env.
+  - ATUALIZACAO: backend.env e marcador; ou, em instalacao anterior a 1.2.28 (sem marcador), o servico registrado.
+  - INCOMPLETA:  backend.env sem marcador e sem servico - uma instalacao nova que falhou no meio. Reaproveita o
+                 backend.env (banco e segredos) e so pede instituicao e administrador.
+  So o estado NOVA grava um backend.env novo (segredos e ENCRYPTION_KEY novos), e ele so existe SEM backend.env:
+  errar entre ATUALIZACAO e INCOMPLETA nunca recria o backend.env. A mesma regra esta em Get-ModoInstalacao
+  (scripts\postinstall.ps1), que confere o modo que o instalador mandou. }
+const
+  INSTALACAO_NOVA = 0;
+  INSTALACAO_ATUALIZACAO = 1;
+  INSTALACAO_INCOMPLETA = 2;
+
+function ClassificarInstalacao(TemBackendEnv, TemMarcador, TemServico: Boolean): Integer;
+begin
+  if not TemBackendEnv then
+    Result := INSTALACAO_NOVA
+  else if TemMarcador or TemServico then
+    Result := INSTALACAO_ATUALIZACAO
+  else
+    Result := INSTALACAO_INCOMPLETA;
+end;
+
+{ Mostrada ao chegar na pagina da instituicao, numa instalacao incompleta }
+function MensagemInstalacaoIncompleta(const Pasta: String): String;
+begin
+  Result := 'Foi encontrada uma instalacao anterior que nao terminou nesta pasta (' + Pasta + '): a configuracao ' +
+    '(config\backend.env) existe, mas a instalacao nao foi concluida e o servico do e-Financeira nao esta registrado.' + #13#10#13#10 +
+    'O banco de dados e a porta configurados nela serao reaproveitados. Informe a instituicao e o ' +
+    'administrador para concluir a instalacao.';
+end;
+
+{ Nome do modo no install-params.json (o postinstall.ps1 confere com a mesma regra) }
+function NomeModoInstalacao(Estado: Integer): String;
+begin
+  case Estado of
+    INSTALACAO_ATUALIZACAO: Result := 'atualizacao';
+    INSTALACAO_INCOMPLETA: Result := 'incompleta';
+  else
+    Result := 'nova';
+  end;
+end;
+
 { Aviso de "banco ja configurado" gravado pelo setup (onpremise-setup.ts) em logs\install-aviso.txt, UTF-8 com BOM:
   o banco ja tinha uma instalacao do e-Financeira e o administrador informado NAO foi criado. Vazio = sem aviso. }
 function LerAvisoInstalacao(const Arquivo: String): String;

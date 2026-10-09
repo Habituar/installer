@@ -67,6 +67,17 @@ begin
     'install-aviso.txt (UTF-8 com BOM, acentos) lido como o setup gravou');
   Registra(LerAvisoInstalacao(ExpandConstant('{param:aviso|}') + '.nao-existe') = '', 'sem install-aviso.txt: sem aviso');
 
+  { Item 2: estado da instalacao - (backend.env, marcador, servico) }
+  Registra(ClassificarInstalacao(False, False, False) = INSTALACAO_NOVA, 'cenario 1 - instalacao nova: sem backend.env -> nova');
+  Registra(ClassificarInstalacao(False, True, True) = INSTALACAO_NOVA, 'sem backend.env e sempre nova (marcador/servico sobrando nao mudam)');
+  Registra(ClassificarInstalacao(True, False, True) = INSTALACAO_ATUALIZACAO, 'cenario 2 - atualizacao da 1.2.27: backend.env + servico, sem marcador -> atualizacao');
+  Registra(ClassificarInstalacao(True, True, True) = INSTALACAO_ATUALIZACAO, 'atualizacao de 1.2.28+: backend.env + marcador + servico -> atualizacao');
+  Registra(ClassificarInstalacao(True, True, False) = INSTALACAO_ATUALIZACAO, 'reinstalacao apos desinstalar: backend.env + marcador, sem servico -> atualizacao');
+  Registra(ClassificarInstalacao(True, False, False) = INSTALACAO_INCOMPLETA, 'cenario 3 - nova que falhou: backend.env, sem marcador e sem servico -> incompleta');
+  Registra((NomeModoInstalacao(INSTALACAO_NOVA) = 'nova') and (NomeModoInstalacao(INSTALACAO_ATUALIZACAO) = 'atualizacao') and
+    (NomeModoInstalacao(INSTALACAO_INCOMPLETA) = 'incompleta'), 'nomes do modo iguais aos do postinstall.ps1 (Get-ModoInstalacao)');
+  Registra(Pos('reaproveitados', MensagemInstalacaoIncompleta('C:\Program Files\eFinanceira')) > 0, 'mensagem da instalacao incompleta explica o reaproveitamento');
+
   SaveStringsToUTF8File(ExpandConstant('{param:saida|}'), Saida, False);
   Result := False;
 end;
