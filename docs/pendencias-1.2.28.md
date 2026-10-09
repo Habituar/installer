@@ -1,8 +1,27 @@
 # Pendências para o 1.2.28
 
 Ficaram de fora do hotfix 1.2.27 (correção do PostgreSQL, inicialização robusta do serviço, erro real na falha do
-instalador e `index.html` sem cache). Nada abaixo está implementado. Linhas citadas: back `main` `f9809e7`, front
-`main` `b68a895`, installer `main` `bb7e9ce`.
+instalador e `index.html` sem cache). As seções abaixo descrevem cada item como foi levantado (linhas citadas: back
+`main` `f9809e7`, front `main` `b68a895`, installer `main` `bb7e9ce`); a situação na 1.2.28 está no quadro.
+
+## Situação na 1.2.28 (branch `release/1.2.28`, 09/10/2026)
+
+| # | Item | Situação | Onde / teste |
+|---|---|---|---|
+| 1 | Banco já configurado | **Feito (versão mínima):** o setup avisa "banco já configurado: o administrador informado NÃO foi criado", com a instituição e os administradores existentes; o instalador mostra o aviso e a página final o exibe no lugar do usuário descartado. **1.2.29:** detectar antes de pedir os dados (versão completa abaixo) | back `lib/instalacaoExistente.ts`; installer `codigo-comum.iss`; testes `instalacaoExistente.test.ts`, `tools\testar-codigo-instalador.ps1` |
+| 2 | Instalação incompleta | **Feito:** marcador `config\instalacao.json` gravado só no fim; nova / atualização (marcador, ou serviço registrado nas instalações antigas) / incompleta (reaproveita o `backend.env`, pede instituição e administrador). Só "nova" grava `backend.env`, e só sem um existente. **Falta:** os 3 cenários numa VM com o instalador final | `codigo-comum.iss` (`ClassificarInstalacao`), `postinstall.ps1` (`Get-ModoInstalacao`); `tools\testar-codigo-instalador.ps1`, `tools\testar-postinstall-config.ps1` |
+| 3 | Redefinir senha do administrador | **Feito:** atalho "Redefinir senha do administrador" (exige administrador do Windows, confirmação SIM; senha só na tela; Auditoria `servidor:<usuário>`). Testado só no banco descartável | back `scripts/redefinirSenhaAdmin.ts`; installer `scripts\redefinir-senha-admin.ps1`; `redefinicaoSenhaAdmin.test.ts`, `tools\testar-redefinir-senha-admin.ps1` |
+| 4 | Login | **Feito:** instalador aceita maiúsculas e e-mail igual ao informado, diz o caractere e a posição; servidor compara `LOWER(login)` nos 3 bancos e recusa logins que só diferem na caixa (409 `LOGIN_AMBIGUO`). Oracle sem teste real (item 8) | back `lib/loginCaixa.ts`; testes em SQL Server e PostgreSQL (`loginCaixa.integracao.test.ts`) |
+| 5 | Textos de senha | **Feito:** "Esqueceu a senha?" do on-premise com o procedimento real e o atalho do item 3 | front `utils/contatoSuporte.ts` |
+| 6 | `SUPORTE_CONTATO` | **Feito:** `chamados.cfi@zapsistemas.com.br` em `global-defaults.env` (a atualização também recebe), `GET /api/suporte` público, as 4 telas e as 3 mensagens de `modoLeitura.ts` | `contatoSuporte.test.ts` (back e front), `tools\testar-postinstall-config.ps1` |
+| 7 | Deadlock na limpeza dos testes | **1.2.29** (integração segue em série) | |
+| 8 | Oracle sem teste real | **1.2.29** | |
+| 9 | PostgreSQL 16.15-5 | **Feito no build** (`deps.sha256`, SHA-256 sempre conferido). **Falta:** instalação nova com o PostgreSQL embutido numa VM, com o instalador final | `tools\testar-deps-sha256.ps1` |
+| 10 | Certificados da RFB | **Conferido em 09/10/2026: sem certificados novos no SPED.** Renovar antes de 25/11/2026 | seção 10 |
+| 11 | Limpeza com CNPJ alfanumérico | **1.2.29** | |
+| 12, 13 | 409 da importação, `test:integracao:pg` | **Feitos** | |
+| 14 | Sobras | **Feito:** `docs\backup-restauracao.md`. **1.2.29:** o restante (XML de PP, tela de banco dedicado, CNPJ do certificado, botão do diagnóstico, demais textos do manual, premissas da migração) | |
+| 15 | API de importação, limites | **1.2.29** (documentado) | |
 
 ## 1. Detecção de banco existente antes de pedir o administrador
 
