@@ -485,24 +485,6 @@ begin
   BackupPage.Add('Confirmo que fiz o backup do banco de dados do e-Financeira');
 end;
 
-{ Mesma regra aceita pelo backend (loginSchema em src/routes/auth.ts): comeca com letra minuscula,
-  só letras minusculas/numeros/pontos, 3 a 30 caracteres. }
-function LoginValido(V: String): Boolean;
-var
-  I: Integer;
-  C: Char;
-begin
-  Result := False;
-  if (Length(V) < 3) or (Length(V) > 30) then Exit;
-  if (V[1] < 'a') or (V[1] > 'z') then Exit;
-  for I := 1 to Length(V) do
-  begin
-    C := V[I];
-    if not (((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '.')) then Exit;
-  end;
-  Result := True;
-end;
-
 { Regra unica de senha - a mesma do sistema (efinanceira-back/src/lib/regrasSenha.ts): 8+ caracteres, maiuscula,
   numero e caractere especial. Devolve o que falta ('' = atende). }
 function FaltasSenha(V: String): String;
@@ -546,6 +528,8 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   P: Integer;
+  Login, Email, ErroAdmin: String;
+  VeioComoEmail: Boolean;
 begin
   Result := True;
   if (CurPageID = BackupPage.ID) and (not BackupPage.Values[0]) then
@@ -615,17 +599,22 @@ begin
   end
   else if CurPageID = AdminPage.ID then
   begin
+    { Login e e-mail normalizados (codigo-comum.iss, NormalizarLoginAdmin): minusculas; login digitado como e-mail
+      igual ao e-mail vira a parte antes do @. Os campos da pagina recebem o valor normalizado (e o que vai ao setup). }
+    Login := AdminPage.Values[1];
+    Email := AdminPage.Values[2];
+    ErroAdmin := NormalizarLoginAdmin(Login, Email, VeioComoEmail);
     if Trim(AdminPage.Values[0]) = '' then
     begin
       MsgBox('Preencha o nome do administrador.', mbError, MB_OK);
       Result := False;
     end
-    else if not LoginValido(Trim(AdminPage.Values[1])) then
+    else if ErroAdmin <> '' then
     begin
-      MsgBox('Usuario invalido: comece com letra minuscula e use apenas letras minusculas, numeros e pontos (3 a 30 caracteres).', mbError, MB_OK);
+      MsgBox(ErroAdmin, mbError, MB_OK);
       Result := False;
     end
-    else if Pos('@', AdminPage.Values[2]) < 2 then
+    else if Pos('@', Email) < 2 then
     begin
       MsgBox('Informe um e-mail valido.', mbError, MB_OK);
       Result := False;
@@ -639,6 +628,14 @@ begin
     begin
       MsgBox('A confirmacao de senha nao confere.', mbError, MB_OK);
       Result := False;
+    end
+    else
+    begin
+      AdminPage.Values[1] := Login;
+      AdminPage.Values[2] := Email;
+      if VeioComoEmail then
+        MsgBox('O login do administrador sera "' + Login + '". Para entrar no sistema, use o e-mail (' + Email +
+          ') ou o login "' + Login + '".', mbInformation, MB_OK);
     end;
   end;
 end;

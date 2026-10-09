@@ -84,3 +84,65 @@ begin
     Result := Result + #13#10#13#10 + Resumo;
   Result := Result + #13#10#13#10 + 'Log completo: ' + ArquivoLog + #13#10#13#10 + 'Abrir o log agora?';
 end;
+
+{ Erro do login (ja em minusculas) pela regra do sistema - comeca com letra, so letras minusculas sem acento, numeros
+  e pontos, 3 a 30 caracteres (LOGIN_REGEX de src/scripts/onpremise-setup.ts) -, dizendo o caractere e a posicao
+  do problema. '' = valido. }
+function ErroLogin(const V: String): String;
+var
+  I: Integer;
+  C: Char;
+begin
+  Result := '';
+  for I := 1 to Length(V) do
+  begin
+    C := V[I];
+    if not (((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '.')) then
+    begin
+      Result := 'O caractere "' + C + '" (posicao ' + IntToStr(I) + ') nao e permitido no login. ' +
+        'Use so letras minusculas sem acento, numeros e pontos.';
+      Exit;
+    end;
+  end;
+  if (Length(V) < 3) or (Length(V) > 30) then
+    Result := 'O login precisa ter de 3 a 30 caracteres (tem ' + IntToStr(Length(V)) + ').'
+  else if (V[1] < 'a') or (V[1] > 'z') then
+    Result := 'O login precisa comecar com uma letra (o caractere "' + V[1] + '" na posicao 1 nao serve).';
+end;
+
+{ Login e e-mail do administrador como serao gravados. Entram como digitados; saem normalizados:
+  - login em minusculas (maiusculas nao sao erro);
+  - login com "@" (um e-mail): aceito se for igual ao e-mail informado, ou se o e-mail estiver vazio (vira o e-mail);
+    o login passa a ser a parte antes do "@" e VeioComoEmail = True (o instalador avisa que da para entrar com os
+    dois). E-mail diferente: recusa, explicando.
+  Devolve '' se tudo certo, ou a mensagem de erro. }
+function NormalizarLoginAdmin(var Login, Email: String; var VeioComoEmail: Boolean): String;
+var
+  P: Integer;
+begin
+  Result := '';
+  VeioComoEmail := False;
+  Login := Lowercase(Trim(Login));
+  Email := Trim(Email);
+  if Login = '' then
+  begin
+    Result := 'Preencha o usuario (login).';
+    Exit;
+  end;
+  P := Pos('@', Login);
+  if P > 0 then
+  begin
+    if (Email <> '') and (Lowercase(Email) <> Login) then
+    begin
+      Result := 'O login "' + Login + '" e um e-mail diferente do e-mail informado (' + Email + '). ' +
+        'Use o mesmo e-mail nos dois campos (o login vira a parte antes do @) ou um login sem @.';
+      Exit;
+    end;
+    if Email = '' then Email := Login;
+    Login := Copy(Login, 1, P - 1);
+    VeioComoEmail := True;
+  end;
+  Result := ErroLogin(Login);
+  if (Result <> '') and VeioComoEmail then
+    Result := 'O login seria "' + Login + '" (a parte antes do @ do e-mail). ' + Result;
+end;
