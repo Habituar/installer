@@ -124,6 +124,16 @@ function Get-Dep {
   Move-Item $parcial $Dest -Force
 }
 
+# license-public.pem x LICENSE_PUBLIC_KEY_B64 (base64 do PEM com quebras LF): compara o texto do PEM com as quebras
+# normalizadas para LF. Antes comparava os bytes: um checkout com core.autocrlf=true trazia o .pem com CRLF e o build
+# falhava com a mesma chave (o .gitattributes agora também mantém o arquivo como está no repositório).
+function Test-ChavePublicaConfere {
+  param([string]$PemTexto, [string]$Base64Esperado)
+  $esperado = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Base64Esperado))
+  $normaliza = { param($t) ($t -replace "`r`n", "`n").TrimStart([char]0xFEFF) }
+  return (& $normaliza $PemTexto) -ceq (& $normaliza $esperado)
+}
+
 function Get-Dependencias {
   Write-Host "==> Dependências externas (deps\, conferidas com deps.sha256)"
   New-Item -ItemType Directory -Force -Path $Deps | Out-Null
@@ -160,8 +170,7 @@ foreach ($k in @('LICENSE_PUBLIC_KEY_B64', 'SUPORTE_CONTATO')) {   # sem SUPORTE
 $licPem = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($globals['LICENSE_PUBLIC_KEY_B64']))
 if ($licPem -match 'PRIVATE KEY') { throw "LICENSE_PUBLIC_KEY_B64 em $GlobalDefaults contém uma chave PRIVADA. Use apenas a chave pública no instalador." }
 if (Test-Path $LicensePublicKey) {   # par regerado e global-defaults.env esquecido = toda licença recusada no cliente
-  $pemB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $LicensePublicKey -Raw)))
-  if ($pemB64 -ne $globals['LICENSE_PUBLIC_KEY_B64']) {
+  if (-not (Test-ChavePublicaConfere (Get-Content $LicensePublicKey -Raw) $globals['LICENSE_PUBLIC_KEY_B64'])) {
     throw "LICENSE_PUBLIC_KEY_B64 em $GlobalDefaults não bate com $LicensePublicKey. Atualize o valor no arquivo (base64 do PEM)."
   }
 }

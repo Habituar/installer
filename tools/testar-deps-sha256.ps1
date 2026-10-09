@@ -9,7 +9,7 @@ $ProgressPreference = 'SilentlyContinue'
 $tokens = $null; $erros = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\build.ps1'), [ref]$tokens, [ref]$erros)
 if ($erros.Count) { throw "build.ps1 não compila: $($erros[0].Message)" }
-foreach ($nomeFn in 'Read-DepsSha256', 'Assert-DepSha256', 'Get-Dep') {
+foreach ($nomeFn in 'Read-DepsSha256', 'Assert-DepSha256', 'Get-Dep', 'Test-ChavePublicaConfere') {
   $fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $nomeFn }, $true) | Select-Object -First 1
   if (-not $fn) { throw "$nomeFn não encontrada em build.ps1" }
   Invoke-Expression $fn.Extent.Text
@@ -84,6 +84,17 @@ try {
 } finally {
   Remove-Item -Recurse -Force $base
 }
+
+# license-public.pem: a mesma chave confere com LF ou CRLF (checkout com core.autocrlf); outra chave, não
+$b64 = (Get-Content (Join-Path $PSScriptRoot '..\config\global-defaults.env') -Encoding UTF8 | Where-Object { $_ -like 'LICENSE_PUBLIC_KEY_B64=*' }) -replace '^LICENSE_PUBLIC_KEY_B64=', ''
+$pemLf = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
+Confere (Test-ChavePublicaConfere $pemLf $b64) 'license-public.pem com LF confere com LICENSE_PUBLIC_KEY_B64'
+Confere (Test-ChavePublicaConfere ($pemLf -replace "`n", "`r`n") $b64) 'license-public.pem com CRLF (checkout com autocrlf) também confere'
+Confere (-not (Test-ChavePublicaConfere ($pemLf -replace 'A', 'B') $b64)) 'outra chave: não confere'
+$pemRepo = Join-Path $PSScriptRoot '..\license-public.pem'
+if (Test-Path $pemRepo) { Confere (Test-ChavePublicaConfere (Get-Content $pemRepo -Raw) $b64) 'license-public.pem deste checkout confere' }
+$attr = & git -C (Join-Path $PSScriptRoot '..') check-attr text -- license-public.pem 2>$null
+Confere ($attr -match 'text: unset') '.gitattributes: license-public.pem sem conversão de quebra de linha (-text)'
 
 if ($Deps) {
   foreach ($nome in $real.Keys) {
