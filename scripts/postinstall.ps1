@@ -170,6 +170,23 @@ function Read-GlobalDefaults {
   }
 }
 
+# Atualização: o backend.env já existe e não é recriado; sem isto, um valor global novo ou renovado (ex.:
+# SUPORTE_CONTATO) nunca chegaria nas instalações existentes. Acrescenta/atualiza só as chaves de global-defaults.env;
+# as demais linhas (segredos cifrados, DB_*) ficam como estão. Teste: tools\testar-postinstall-config.ps1.
+function Merge-GlobalDefaults {
+  param([string[]]$Atual, [string[]]$Globais)
+  $linhas = @($Atual | Where-Object { $null -ne $_ })
+  $mudou = $false
+  foreach ($g in $Globais) {
+    $key = $g.Substring(0, $g.IndexOf('='))
+    $idx = -1
+    for ($i = 0; $i -lt $linhas.Count; $i++) { if ($linhas[$i] -like "$key=*") { $idx = $i; break } }
+    if ($idx -lt 0)               { $linhas += $g; $mudou = $true; Write-Host "global-defaults: $key adicionado ao backend.env." }
+    elseif ($linhas[$idx] -ne $g) { $linhas[$idx] = $g; $mudou = $true; Write-Host "global-defaults: $key atualizado no backend.env." }
+  }
+  return @{ Linhas = $linhas; Mudou = $mudou }
+}
+
 function Wait-Port {
   param([int]$Port, [int]$TimeoutSec = 90, [string]$HostName = '127.0.0.1')
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -564,15 +581,9 @@ try {
     $script:Etapa = 'Atualização da configuração (config\backend.env)'
     # backend.env já existe e não é recriado; sem isto, um valor global renovado nunca chegaria
     # nas instalações existentes. Atualiza/acrescenta só as chaves de global-defaults.env.
-    $current = @(Get-Content $EnvFile -Encoding UTF8)
-    $changed = $false
-    foreach ($g in @(Read-GlobalDefaults $GlobalsFile)) {
-      $key = $g.Substring(0, $g.IndexOf('='))
-      $idx = -1
-      for ($i = 0; $i -lt $current.Count; $i++) { if ($current[$i] -like "$key=*") { $idx = $i; break } }
-      if ($idx -lt 0)                { $current += $g; $changed = $true; Write-Host "global-defaults: $key adicionado ao backend.env." }
-      elseif ($current[$idx] -ne $g) { $current[$idx] = $g; $changed = $true; Write-Host "global-defaults: $key atualizado no backend.env." }
-    }
+    $mescla = Merge-GlobalDefaults @(Get-Content $EnvFile -Encoding UTF8) @(Read-GlobalDefaults $GlobalsFile)
+    $current = $mescla.Linhas
+    $changed = $mescla.Mudou
     # Instalações anteriores não tinham ENCRYPTION_KEY: gera uma vez. O backend recifra o certificado salvo (que
     # estava com a chave derivada do JWT_SECRET) na primeira vez que o usar.
     if (-not ($current | Where-Object { $_ -like 'ENCRYPTION_KEY=*' })) {

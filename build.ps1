@@ -154,7 +154,7 @@ $globals = @{}
 Get-Content $GlobalDefaults -Encoding UTF8 | ForEach-Object {
   if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { $globals[$Matches[1]] = $Matches[2].TrimEnd() }
 }
-foreach ($k in @('LICENSE_PUBLIC_KEY_B64')) {
+foreach ($k in @('LICENSE_PUBLIC_KEY_B64', 'SUPORTE_CONTATO')) {   # sem SUPORTE_CONTATO o cliente não veria contato nenhum
   if (-not $globals[$k]) { throw "$k ausente ou vazio em $GlobalDefaults" }
 }
 $licPem = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($globals['LICENSE_PUBLIC_KEY_B64']))
