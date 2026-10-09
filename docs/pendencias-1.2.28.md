@@ -22,6 +22,8 @@ instalador e `index.html` sem cache). As seções abaixo descrevem cada item com
 | 12, 13 | 409 da importação, `test:integracao:pg` | **Feitos** | |
 | 14 | Sobras | **Feito:** `docs\backup-restauracao.md`. **1.2.29:** o restante (XML de PP, tela de banco dedicado, CNPJ do certificado, botão do diagnóstico, demais textos do manual, premissas da migração) | |
 | 15 | API de importação, limites | **1.2.29** (documentado) | |
+| 16 | "Criptografia NÃO confere" no Testar Conectividade | **Corrigido:** a comparação TLS x certificado de criptografia foi retirada (são certificados diferentes por desenho); a tela mostra o certificado TLS (emissor, validade) e o vencimento dos certificados de criptografia em uso, com alerta a 45 dias ou menos | seção 16; `conectividadeRfb.test.ts`, front `vencimentoCriptografia.test.ts` |
+| 17 | Checkout limpo do installer não gerava o pacote | **Corrigido:** `.gitattributes` (`license-public.pem -text`) e o `build.ps1` compara o PEM com as quebras de linha normalizadas | seção 17; `tools\testar-deps-sha256.ps1` |
 
 ## 1. Detecção de banco existente antes de pedir o administrador
 
@@ -122,7 +124,7 @@ Trocar o 16.4-1 (08/2024) pela correção mais nova da série 16 publicada pela 
 
 Renovar certificados de criptografia RFB: Produção vence em 25/11/2026, Produção Restrita em 23/12/2026; baixar os novos em http://sped.rfb.gov.br/pasta/show/2064 e distribuir.
 
-Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 30 dias). O "Testar Conectividade" mostra se a chave do servidor confere com o certificado em uso.
+Como distribuir sem reinstalar: Configurações → Certificados da RFB → Atualizar (por ambiente), ou trocar o arquivo em `config\rfb\` (`cert-criptografia-producao.cer` / `cert-criptografia-producao-restrita.cer`). O pacote seguinte deve trazê-los em `efinanceira-back/src/recursos/rfb/` (o `build.ps1` falha com certificado vencido e avisa a 30 dias). O "Testar Conectividade" mostra o vencimento dos certificados de criptografia em uso, com alerta a 45 dias ou menos (não os compara com o certificado TLS do servidor — ver item 16).
 
 **Verificado em 09/10/2026 (1.2.28): ainda não há certificados novos.** A página do SPED (pasta 2064) publica só os
 mesmos do pacote — Produção "Certificado efinanceira (Ambiente de Produção)_2025", validade até 25/11/2026, thumbprint
@@ -159,3 +161,32 @@ Roda `tests/integracao/*.test.ts` com `DB_TYPE=postgres` (o tipo das colunas de 
 - Limites: 60 requisições/min por chave (pelo prefixo) e, para chave inválida, 20 tentativas/min por IP (acima: 429; `IMPORT_API_FALHAS_IP_MIN`). A chave é conferida antes: chave válida nunca é barrada pelo limite por IP. Os contadores ficam em memória (zeram ao reiniciar o serviço).
 - Tabelas `ChaveApi` (master) e `ImportacaoApi` (base): migrations testadas em PostgreSQL e SQL Server; Oracle sem teste real (item 8).
 - No histórico de importações e na Auditoria, o "usuário" das chamadas pela API é `chave:<prefixo>` (a tela não traduz para o nome da chave).
+
+## 16. "Criptografia de lotes: NÃO confere com o servidor" no Testar Conectividade (CORRIGIDO na 1.2.28)
+
+**Achado no teste da 1.2.28:** em Homologação e Produção, rede, DNS, TCP e TLS ok, mas "criptografia de lotes: NÃO
+confere com o servidor" nos dois ambientes — com os envios recentes em Homologação aceitos pela RFB.
+
+**Causa:** a comparação (introduzida na própria 1.2.28, grupo D) supunha que a chave pública do certificado TLS do
+servidor fosse a mesma do certificado de criptografia de lotes. Não há base para isso:
+- Manual do Desenvolvedor da e-Financeira v2.7, 4.1.3, passo 3: a chave AES do lote é cifrada "com a chave pública do
+  certificado e-Financeira gerado exclusivamente para este fim ... (Este certificado está disponível no site do Portal
+  SPED na sessão da e-Financeira para download)";
+- 1.6: o HTTPS (TLS 1.2, autenticação mútua) é só o canal de comunicação;
+- 4.1.5, MS0042: a RFB confere o certificado de criptografia pelo thumbprint informado no lote, não pelo TLS;
+- na prática o TLS usa certificado de CA pública (YR1/YR2, raiz ISRG X1, renovação ~90 dias, vencimentos 20/12 e
+  18/12), e os de criptografia do SPED vencem em 25/11/2026 e 23/12/2026.
+
+**Correção:** a comparação e a mensagem "NÃO confere" saíram do Testar Conectividade (back `services/conectividadeRfb.ts`,
+front `ResultadoTesteRfb.tsx`). A chave `RFB_VERIFICAR_CERTIFICADO_SERVIDOR` continua valendo só para a confiança na
+cadeia TLS da transmissão; nunca teve efeito sobre a criptografia (teste com a chave ligada e desligada). A tela mantém
+DNS/TCP/TLS e o certificado TLS do servidor (emissor e validade) e passa a mostrar o vencimento dos certificados de
+criptografia em uso nos dois ambientes, com alerta a 45 dias ou menos (`vencimentosCriptografiaRfb`). A aba
+Certificados da RFB e o `build.ps1` continuam avisando a 30 dias.
+
+## 17. Checkout limpo do installer não gerava o pacote (CORRIGIDO na 1.2.28)
+
+O `license-public.pem` é versionado com LF; com `core.autocrlf=true` o checkout o trazia com CRLF e o `build.ps1`, que
+comparava os bytes com `LICENSE_PUBLIC_KEY_B64`, parava ("não bate") com a mesma chave. Correção: `.gitattributes`
+(`license-public.pem -text`) e a comparação do `build.ps1` normaliza as quebras de linha (`Test-ChavePublicaConfere`).
+Teste: `tools\testar-deps-sha256.ps1`.
