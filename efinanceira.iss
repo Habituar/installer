@@ -52,6 +52,8 @@ Source: "deps\postgresql-installer.exe"; DestDir: "{tmp}"; Flags: deleteafterins
 Name: "{group}\e-Financeira"; Filename: "{app}\e-Financeira.url"
 Name: "{group}\Logs do e-Financeira"; Filename: "{app}\logs"
 Name: "{group}\Voltar para a versao anterior (rollback)"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\rollback.ps1"""; WorkingDir: "{app}"; Comment: "Desfaz a ultima atualizacao (exige administrador)"
+; Item 3 (pendencias 1.2.28): o unico administrador esqueceu a senha. Mesmo nome citado na tela de login do on-premise.
+Name: "{group}\Redefinir senha do administrador"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\redefinir-senha-admin.ps1"""; WorkingDir: "{app}"; Comment: "Gera uma senha temporaria para um administrador do e-Financeira (exige administrador)"
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall-services.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveServices"
@@ -72,6 +74,9 @@ var
   CnpjEdit: TPasswordEdit;      { ClientePage.Edits[1] — mascara em tempo real }
   FormatandoCnpj: Boolean;      { evita reentrar no OnChange ao reescrever o Text }
   BackupPage: TInputOptionWizardPage; { atualizacao: confirmacao obrigatoria do backup do banco }
+  AvisoInstalacao: String;      { logs\install-aviso.txt: banco ja configurado, administrador nao criado (item 1) }
+  EstadoCongelado: Integer;     { EstadoInstalacao fixado no PrepareToInstall; -1 = ainda nao }
+  AvisouIncompleta: Boolean;    { mensagem de instalacao incompleta ja mostrada }
 
 const
   ColorNeutralBg = $00F5F5F5;   { cinza bem claro: em andamento }
@@ -83,9 +88,35 @@ const
   ColorErrBar  = $004747E5;
   ColorErrText = $002424C9;
 
+{ Codigo compartilhado com os testes do instalador (tools\testar-codigo-instalador.iss): estado da instalacao, login
+  do administrador, avisos e mensagens de falha. Incluido antes de tudo que o usa. }
+#include "codigo-comum.iss"
+
+{ Estado da pasta escolhida (codigo-comum.iss, ClassificarInstalacao). Antes: "atualizacao" = backend.env existe, e
+  uma instalacao nova que falhou depois de gravar o backend.env virava "atualizacao" e nunca criava o administrador. }
+function EstadoInstalacao: Integer;
+begin
+  { Congelado no inicio da instalacao (PrepareToInstall): depois dela o postinstall grava o marcador e o servico, e
+    uma instalacao nova passaria a parecer atualizacao na pagina final. Antes disso, vale a pasta escolhida agora. }
+  if EstadoCongelado >= 0 then
+  begin
+    Result := EstadoCongelado;
+    Exit;
+  end;
+  Result := ClassificarInstalacao(
+    FileExists(WizardDirValue + '\config\backend.env'),
+    FileExists(WizardDirValue + '\config\instalacao.json'),
+    RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\{#ServiceName}'));
+end;
+
 function IsUpgrade: Boolean;
 begin
-  Result := FileExists(WizardDirValue + '\config\backend.env');
+  Result := EstadoInstalacao = INSTALACAO_ATUALIZACAO;
+end;
+
+function IsIncompleta: Boolean;
+begin
+  Result := EstadoInstalacao = INSTALACAO_INCOMPLETA;
 end;
 
 { Tipo escolhido: 0 = PostgreSQL embutido, 1 = PostgreSQL existente, 2 = SQL Server, 3 = Oracle }
@@ -116,7 +147,7 @@ end;
 
 function NeedPgInstaller: Boolean;
 begin
-  Result := (not IsUpgrade) and IsEmbedded;
+  Result := (EstadoInstalacao = INSTALACAO_NOVA) and IsEmbedded;
 end;
 
 { Escapa para dentro de uma string PowerShell entre aspas duplas: crase, aspas e $ (que senao
@@ -128,9 +159,6 @@ begin
   StringChangeEx(S, '$', '`$', True);
   Result := S;
 end;
-
-{ Utf8Decode, LerResumoErroInstalacao e MensagemFalhaConfiguracao: codigo compartilhado com os testes do instalador }
-#include "codigo-comum.iss"
 
 { Testa a conexao com os dados preenchidos na pagina "Conexao com o banco de dados".
   SQL Server: login de verdade (System.Data.SqlClient, que ja vem no Windows) — confirma
@@ -371,6 +399,8 @@ end;
 
 procedure InitializeWizard;
 begin
+  EstadoCongelado := -1;
+  AvisouIncompleta := False;
   DbModePage := CreateInputOptionPage(wpSelectDir, 'Banco de dados',
     'Onde ficara o banco de dados do e-Financeira?',
     'Escolha uma das opcoes abaixo.', True, False);
@@ -472,7 +502,7 @@ begin
   AdminPage.Add('Nome do administrador:', False);
   AdminPage.Add('Usuario (login):', False);
   AdminPage.Add('E-mail:', False);
-  AdminPage.Add('Senha (minimo 8 caracteres):', True);
+  AdminPage.Add('Senha (8+ caracteres, com maiuscula, numero e caractere especial):', True);
   AdminPage.Add('Confirmar senha:', True);
 
   { So na atualizacao: a nova versao aplica alteracoes no banco (migrations). O rollback (scripts\rollback.ps1)
@@ -485,22 +515,28 @@ begin
   BackupPage.Add('Confirmo que fiz o backup do banco de dados do e-Financeira');
 end;
 
-{ Mesma regra aceita pelo backend (loginSchema em src/routes/auth.ts): comeca com letra minuscula,
-  só letras minusculas/numeros/pontos, 3 a 30 caracteres. }
-function LoginValido(V: String): Boolean;
+{ Regra unica de senha - a mesma do sistema (efinanceira-back/src/lib/regrasSenha.ts): 8+ caracteres, maiuscula,
+  numero e caractere especial. Devolve o que falta ('' = atende). }
+function FaltasSenha(V: String): String;
 var
   I: Integer;
   C: Char;
+  Mai, Num, Esp: Boolean;
 begin
-  Result := False;
-  if (Length(V) < 3) or (Length(V) > 30) then Exit;
-  if (V[1] < 'a') or (V[1] > 'z') then Exit;
+  Mai := False; Num := False; Esp := False;
   for I := 1 to Length(V) do
   begin
     C := V[I];
-    if not (((C >= 'a') and (C <= 'z')) or ((C >= '0') and (C <= '9')) or (C = '.')) then Exit;
+    if (C >= 'A') and (C <= 'Z') then Mai := True
+    else if (C >= '0') and (C <= '9') then Num := True
+    else if not ((C >= 'a') and (C <= 'z')) then Esp := True;
   end;
-  Result := True;
+  Result := '';
+  if Length(V) < 8 then Result := Result + ', pelo menos 8 caracteres';
+  if not Mai then Result := Result + ', uma letra maiuscula (A-Z)';
+  if not Num then Result := Result + ', um numero (0-9)';
+  if not Esp then Result := Result + ', um caractere especial (ex.: ! @ # $ %)';
+  if Result <> '' then Result := Copy(Result, 3, Length(Result));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -508,12 +544,16 @@ begin
   Result := False;
   if PageID = BackupPage.ID then
   begin
-    Result := not IsUpgrade; { instalacao nova: nao ha banco para guardar }
+    Result := not IsUpgrade; { instalacao nova ou incompleta: nao ha dados para guardar }
     Exit;
   end;
   { Em atualizacao, nada e perguntado: config e banco existentes sao mantidos }
   if IsUpgrade and ((PageID = DbModePage.ID) or (PageID = DbConnPage.ID) or (PageID = TestPage.ID) or
                     (PageID = AppPage.ID) or (PageID = ClientePage.ID) or (PageID = AdminPage.ID)) then
+    Result := True
+  { Instalacao incompleta: banco e porta vem do backend.env que ficou; so instituicao e administrador }
+  else if IsIncompleta and ((PageID = DbModePage.ID) or (PageID = DbConnPage.ID) or (PageID = TestPage.ID) or
+                            (PageID = AppPage.ID)) then
     Result := True
   else if (PageID = DbConnPage.ID) or (PageID = TestPage.ID) then
     Result := IsEmbedded;
@@ -522,6 +562,8 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   P: Integer;
+  Login, Email, ErroAdmin: String;
+  VeioComoEmail: Boolean;
 begin
   Result := True;
   if (CurPageID = BackupPage.ID) and (not BackupPage.Values[0]) then
@@ -591,30 +633,43 @@ begin
   end
   else if CurPageID = AdminPage.ID then
   begin
+    { Login e e-mail normalizados (codigo-comum.iss, NormalizarLoginAdmin): minusculas; login digitado como e-mail
+      igual ao e-mail vira a parte antes do @. Os campos da pagina recebem o valor normalizado (e o que vai ao setup). }
+    Login := AdminPage.Values[1];
+    Email := AdminPage.Values[2];
+    ErroAdmin := NormalizarLoginAdmin(Login, Email, VeioComoEmail);
     if Trim(AdminPage.Values[0]) = '' then
     begin
       MsgBox('Preencha o nome do administrador.', mbError, MB_OK);
       Result := False;
     end
-    else if not LoginValido(Trim(AdminPage.Values[1])) then
+    else if ErroAdmin <> '' then
     begin
-      MsgBox('Usuario invalido: comece com letra minuscula e use apenas letras minusculas, numeros e pontos (3 a 30 caracteres).', mbError, MB_OK);
+      MsgBox(ErroAdmin, mbError, MB_OK);
       Result := False;
     end
-    else if Pos('@', AdminPage.Values[2]) < 2 then
+    else if Pos('@', Email) < 2 then
     begin
       MsgBox('Informe um e-mail valido.', mbError, MB_OK);
       Result := False;
     end
-    else if Length(AdminPage.Values[3]) < 8 then
+    else if FaltasSenha(AdminPage.Values[3]) <> '' then
     begin
-      MsgBox('A senha precisa ter pelo menos 8 caracteres.', mbError, MB_OK);
+      MsgBox('A senha precisa ter ' + FaltasSenha(AdminPage.Values[3]) + '.', mbError, MB_OK);
       Result := False;
     end
     else if AdminPage.Values[3] <> AdminPage.Values[4] then
     begin
       MsgBox('A confirmacao de senha nao confere.', mbError, MB_OK);
       Result := False;
+    end
+    else
+    begin
+      AdminPage.Values[1] := Login;
+      AdminPage.Values[2] := Email;
+      if VeioComoEmail then
+        MsgBox('O login do administrador sera "' + Login + '". Para entrar no sistema, use o e-mail (' + Email +
+          ') ou o login "' + Login + '".', mbInformation, MB_OK);
     end;
   end;
 end;
@@ -649,6 +704,12 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   Porta, Url, Msg: String;
 begin
+  { Instalacao incompleta (item 2): explica, uma vez, por que so instituicao e administrador sao pedidos }
+  if (CurPageID = ClientePage.ID) and IsIncompleta and (not AvisouIncompleta) then
+  begin
+    AvisouIncompleta := True;
+    SuppressibleMsgBox(MensagemInstalacaoIncompleta(WizardDirValue), mbInformation, MB_OK, IDOK);
+  end;
   if CurPageID <> wpFinished then Exit;
 
   Porta := GetInstalledPort;
@@ -672,11 +733,8 @@ begin
       Msg := Msg + #13#10 +
         '   (de outros computadores da rede: http://' + GetEnv('COMPUTERNAME') + ':' + Porta + ')';
     Msg := Msg + #13#10#13#10 +
-      'Primeiro acesso (administrador):' + #13#10 +
-      '   Usuario: ' + Trim(AdminPage.Values[1]) + #13#10 +
-      '   E-mail:  ' + Trim(AdminPage.Values[2]) + #13#10 +
-      '   Senha:   a que voce definiu nesta instalacao' + #13#10#13#10 +
-      'Guarde essas informacoes em local seguro. O atalho "e-Financeira" foi criado no menu Iniciar.';
+      BlocoPrimeiroAcesso(Trim(AdminPage.Values[1]), Trim(AdminPage.Values[2]), AvisoInstalacao) + #13#10#13#10 +
+      'O atalho "e-Financeira" foi criado no menu Iniciar.';
   end;
 
   WizardForm.FinishedLabel.AutoSize := False;
@@ -688,6 +746,8 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   RC: Integer;
 begin
+  EstadoCongelado := -1;
+  EstadoCongelado := EstadoInstalacao; { daqui em diante o estado nao muda (ver EstadoInstalacao) }
   { Atualizacao: para o servico para liberar os arquivos }
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, RC);
   Sleep(4000);
@@ -729,6 +789,7 @@ begin
   ForceDirectories(ExpandConstant('{app}\config'));
   SetArrayLength(Lines, 1);
   Lines[0] := '{' +
+    '"modo":"' + NomeModoInstalacao(EstadoInstalacao) + '",' +
     '"dbMode":"' + Mode + '",' +
     '"dbType":"' + DbTypeValue + '",' +
     '"pgInstaller":"' + J(ExpandConstant('{tmp}\postgresql-installer.exe')) + '",' +
@@ -752,14 +813,16 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   RC, ErroAbrir: Integer;
-  ArquivoErro, ArquivoLog: String;
+  ArquivoErro, ArquivoLog, ArquivoAviso: String;
 begin
   if CurStep = ssPostInstall then
   begin
     WriteParams;
     ArquivoErro := ExpandConstant('{app}\logs\install-erro.txt');
     ArquivoLog := ExpandConstant('{app}\logs\install.log');
+    ArquivoAviso := ExpandConstant('{app}\logs\install-aviso.txt');
     DeleteFile(ArquivoErro); { nunca mostrar o erro de uma execucao anterior (ex.: powershell nem chegou a rodar) }
+    DeleteFile(ArquivoAviso); { idem para o aviso de banco ja configurado }
     WizardForm.StatusLabel.Caption := 'Configurando banco de dados e servicos (pode levar alguns minutos)...';
     if (not Exec('powershell.exe',
           '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\postinstall.ps1') + '"',
@@ -770,6 +833,14 @@ begin
       if SuppressibleMsgBox(MensagemFalhaConfiguracao(RC, LerResumoErroInstalacao(ArquivoErro), ArquivoLog),
            mbError, MB_YESNO, IDNO) = IDYES then
         ShellExec('', 'notepad.exe', '"' + ArquivoLog + '"', '', SW_SHOWNORMAL, ewNoWait, ErroAbrir);
+    end
+    else
+    begin
+      { Item 1 (pendencias 1.2.28): o banco ja tinha o e-Financeira configurado - o administrador informado NAO foi
+        criado. Antes isso so aparecia no install.log e a tela final mandava entrar com o usuario descartado. }
+      AvisoInstalacao := LerAvisoInstalacao(ArquivoAviso);
+      if AvisoInstalacao <> '' then
+        SuppressibleMsgBox(AvisoInstalacao, mbInformation, MB_OK, IDOK);
     end;
   end;
 end;

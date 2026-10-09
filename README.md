@@ -6,7 +6,7 @@ Gera um único `efinanceira-onpremise-<versão>-setup.exe`. O cliente executa, r
 
 ## O que o instalador coloca no servidor
 
-- Node 20 embutido (o cliente não instala nada antes)
+- Node 22 embutido (`-NodeVersion` do `build.ps1`; o cliente não instala nada antes)
 - Backend (`dist/`) e frontend buildado, servidos **na mesma porta** (padrão 3001)
 - Serviço `efinanceira-api` (WinSW): inicia com o Windows e reinicia sozinho se cair
 - Banco de dados do sistema, à escolha do cliente na instalação:
@@ -47,11 +47,13 @@ Resultado: `installer\output\efinanceira-onpremise-1.0.0-setup.exe`.
 
 | Arquivo em `deps\` | Origem (parâmetro do `build.ps1`) | Quando é usado |
 |---|---|---|
-| `node-v22.14.0-win-x64.zip` | `https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip` (`-NodeVersion`); SHA-256 conferido com o `SHASUMS256.txt` oficial | sempre (Node embutido) |
+| `node-v22.14.0-win-x64.zip` | `https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip` (`-NodeVersion`) | sempre (Node embutido) |
 | `WinSW-x64.exe` | `https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe` (`-WinSWUrl`) | sempre (serviço do Windows) |
-| `postgresql-installer.exe` | `https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64.exe` (`-PgInstallerUrl`) | só no instalador **com** PostgreSQL (não com `-SemPostgres`) |
+| `postgresql-installer.exe` | `https://get.enterprisedb.com/postgresql/postgresql-16.15-5-windows-x64.exe` (`-PgInstallerUrl`) | só no instalador **com** PostgreSQL (não com `-SemPostgres`) |
 
-**Máquina de build sem internet:** baixe os arquivos acima em outra máquina, com **exatamente esses nomes**, e coloque-os em `installer\deps\` antes do build. Para só preparar ou conferir a pasta, sem exigir back/front/Inno Setup e sem gerar instalador:
+**SHA-256 conferido sempre:** o hash esperado de cada arquivo fica em `installer\deps.sha256` (versionado), com a versão e a origem. O `build.ps1` confere todo arquivo de `deps\`, baixado agora ou já presente. Se o hash não bate, ou o arquivo não tem linha em `deps.sha256`, o build para mostrando o arquivo, o hash esperado e o obtido; não apaga o arquivo nem baixa de novo (um download com hash errado fica como `<arquivo>.rejeitado`). Sem `-WinSWUrl`/`-PgInstallerUrl`, a origem é a registrada; outra origem só é aceita depois de registrar o hash dela. Trocar a versão de uma dependência = trocar a linha dela em `deps.sha256` (hash e origem) no mesmo commit. O WinSW não tem checksum oficial publicado: o hash registrado é o do arquivo já usado nos instaladores anteriores. Teste: `tools\testar-deps-sha256.ps1` (com `-Deps <pasta>`, confere também os arquivos de uma pasta `deps\`).
+
+**Máquina de build sem internet:** baixe os arquivos acima em outra máquina, com **exatamente esses nomes**, e coloque-os em `installer\deps\` antes do build (o SHA-256 é conferido do mesmo jeito). Para só preparar ou conferir a pasta, sem exigir back/front/Inno Setup e sem gerar instalador:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File installer\build.ps1 -SoDependencias              # os três
@@ -70,7 +72,9 @@ Se faltar um arquivo e o download falhar, o build para com a mensagem "Não cons
 | Situação | Comportamento |
 |---|---|
 | Atualização (rodar o novo setup por cima) | Pede a **confirmação do backup do banco** (obrigatória) e guarda a versão em uso em `previous\`. Depois para o serviço, troca os arquivos e reinicia. O backend aplica as migrations novas ao subir. `config\` e o banco são preservados. Se não conseguir guardar a versão anterior, cancela sem mexer em nada |
+| Instalação anterior que não terminou | O instalador distingue **nova** (sem `config\backend.env`), **atualização** (`backend.env` e o marcador `config\instalacao.json`, gravado só no fim de uma execução bem-sucedida; nas instalações anteriores à 1.2.28, o serviço registrado) e **incompleta** (`backend.env` sem marcador e sem serviço). Na incompleta, reaproveita o banco e os segredos do `backend.env`, pede só instituição e administrador e conclui. Um `backend.env` existente nunca é recriado |
 | Rollback (voltar para a versão anterior) | Menu Iniciar → *Voltar para a versão anterior (rollback)*, ou `scripts\rollback.ps1` como Administrador. Desfaz no banco só as migrations que a versão anterior não conhece, restaura `backend\`, `frontend\` e `scripts\` de `previous\`, sobe o serviço e confere o `/health`. A versão desfeita fica em `desfeita-<data>\`, e o log fica em `logs\rollback-*.log` |
+| Administrador esqueceu a senha | Menu Iniciar → *Redefinir senha do administrador*, ou `scripts\redefinir-senha-admin.ps1` como Administrador. Lista os administradores, pede o login e a confirmação (SIM), gera uma senha temporária mostrada **só na tela** (nunca em log), obriga a troca no próximo login, desbloqueia/reativa o usuário, encerra as sessões dele e registra na Auditoria (`servidor:<usuário do Windows>`). Log sem a senha: `logs\redefinir-senha-admin.log`. Teste: `tools\testar-redefinir-senha-admin.ps1` (só em banco de teste) |
 | Desinstalação | Remove o serviço e a regra de firewall. **Mantém** `config\`, `logs\`, `pgdata\` e `pgsql\` |
 
 Pastas no cliente (`C:\Program Files\eFinanceira` por padrão):
@@ -78,6 +82,12 @@ Pastas no cliente (`C:\Program Files\eFinanceira` por padrão):
 - `config\backend.env`: variáveis e segredos, cifrados com DPAPI. **Faça backup:** perder a `ENCRYPTION_KEY` torna ilegível o certificado digital salvo, e perder o `JWT_SECRET` ou o `CONNECTION_CIPHER_KEY` torna ilegíveis as senhas das bases
 - `previous\`: a versão anterior, guardada pela última atualização (para o rollback)
 - `config\pg-admin.txt`: senha do superusuário do PostgreSQL embutido
+- `config\rfb\`: certificados **públicos** da RFB para criptografia de lotes, um por ambiente
+  (`cert-criptografia-producao.cer` e `cert-criptografia-producao-restrita.cer`). Vêm do pacote do backend
+  (`src\recursos\rfb`, baixados de http://sped.rfb.gov.br/pasta/show/2064). Vencem uma vez por ano: o Administrador
+  renova em Configurações > Certificados da RFB (ou trocando o arquivo da pasta), sem reinstalar; a tela (e o `build.ps1`) avisa 45 dias
+  antes. Uma atualização do instalador só troca o arquivo da pasta por um do pacote que vença **depois**.
+  Teste da instalação desses arquivos: `tools\testar-certificados-rfb.ps1`.
 - `logs\`: `install.log` e logs do serviço
 
 ## Checklist de release
@@ -103,7 +113,6 @@ Antes de entregar uma versão a qualquer cliente:
 
 ## Pendências conhecidas
 
-- **`CERT_SERVIDOR_RFB` não é configurado.** O backend precisa desse certificado público da RFB para transmitir lotes, e hoje é uma única variável (homologação e produção usam `.cer` diferentes). Sem ele o cliente não transmite. Falta decidir como distribuir.
 - **SQL Server e Oracle como banco do sistema: schema gerado a partir das entidades, mas ainda não testado contra servidores reais.** Teste os dois (instalação limpa + login) antes de vender. As migrations ficam em `src/migrations/mssql` e `src/migrations/oracle`; qualquer mudança futura de entidade precisa de migration nova para os três bancos.
 - Backup agendado do banco, assinatura de código do `.exe` (sem ela o SmartScreen avisa) e o frontend ainda não revisado.
 - Confira as versões dos downloads no `build.ps1` (Node, WinSW, PostgreSQL) antes de cada release.

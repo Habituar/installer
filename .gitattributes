@@ -1,0 +1,3 @@
+# Chave pública de licença: conferida pelo build.ps1 com LICENSE_PUBLIC_KEY_B64 (base64 do PEM com LF). Sem conversão
+# de quebra de linha no checkout (core.autocrlf=true trazia CRLF e o checkout limpo não gerava o pacote).
+license-public.pem -text

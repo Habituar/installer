@@ -2,8 +2,12 @@
   Executado pelo instalador depois que os arquivos foram copiados.
   Instalação nova : (opcional) instala PostgreSQL, cria banco/usuário, gera segredos, cria as tabelas,
                     cria o Cliente (CNPJ) + administrador, registra e sobe o serviço.
-  Atualização     : (config\backend.env já existe) atualiza o serviço existente no lugar (sem recriá-lo) e
-                    reaplica a configuração de boot; o backend aplica as migrations novas sozinho ao iniciar.
+  Atualização     : (config\backend.env e o marcador config\instalacao.json, ou — instalação anterior à 1.2.28 — o
+                    serviço registrado) atualiza o serviço existente no lugar (sem recriá-lo) e reaplica a
+                    configuração de boot; o backend aplica as migrations novas sozinho ao iniciar.
+  Incompleta      : (backend.env sem marcador e sem serviço: instalação nova que falhou no meio) mantém o backend.env
+                    (banco e segredos), cria instituição e administrador, registra e sobe o serviço.
+  O marcador só é gravado no fim de uma execução bem-sucedida (Get-ModoInstalacao, Write-MarcadorInstalacao).
   Log: <app>\logs\install.log
   Falha: <app>\logs\install-erro.txt — linha útil do erro + etapa, mostrada na tela de falha do instalador.
 #>
@@ -17,6 +21,7 @@ New-Item -ItemType Directory -Force -Path $ConfigDir, $LogDir | Out-Null
 Start-Transcript -Path (Join-Path $LogDir 'install.log') -Append | Out-Null
 
 $ParamsFile = Join-Path $ConfigDir 'install-params.json'
+$MarcadorFile = Join-Path $ConfigDir 'instalacao.json'   # gravado só no fim de uma instalação/atualização concluída
 $EnvFile    = Join-Path $ConfigDir 'backend.env'
 $GlobalsFile = Join-Path $ConfigDir 'global-defaults.env'   # valores fixos de toda instalação (vem do build)
 $Node      = Join-Path $App 'node\node.exe'
@@ -24,6 +29,36 @@ $BackendDir = Join-Path $App 'backend'
 $SvcName    = 'efinanceira-api'
 $PgSvc      = 'efinanceira-pg'
 $PgPort     = 5433   # fora da 5432 para não colidir com outro PostgreSQL da máquina
+
+# ------------------------------------------------------------------ certificados de criptografia da RFB
+# Os certificados públicos da RFB para cifrar os lotes (Produção e Produção Restrita) vêm no pacote do backend
+# (backend\dist\recursos\rfb) e ficam em config\rfb, de onde o sistema os lê (RFB_CERTS_DIR, ver run-service.ps1).
+# O Administrador renova pela tela (Configurações > Certificados da RFB) ou trocando o arquivo, sem reinstalar.
+# Na atualização, o arquivo da pasta só é trocado pelo do pacote se o do pacote vencer DEPOIS (não desfaz uma
+# renovação mais nova feita pelo Administrador); o anterior fica como .anterior.
+function Install-CertificadosRfb {
+  $origem  = Join-Path $App 'backend\dist\recursos\rfb'
+  $destino = Join-Path $ConfigDir 'rfb'
+  New-Item -ItemType Directory -Force -Path $destino | Out-Null
+  foreach ($arq in @(Get-ChildItem -Path $origem -Filter '*.cer' -ErrorAction SilentlyContinue)) {
+    $alvo = Join-Path $destino $arq.Name
+    $novo = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $arq.FullName
+    if (-not (Test-Path $alvo)) {
+      Copy-Item $arq.FullName $alvo
+      Write-Host "Certificado RFB $($arq.Name) instalado (vence em $($novo.NotAfter.ToString('dd/MM/yyyy')))."
+      continue
+    }
+    $atual = $null
+    try { $atual = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $alvo } catch { }
+    if (-not $atual -or $novo.NotAfter -gt $atual.NotAfter) {
+      Copy-Item $alvo "$alvo.anterior" -Force
+      Copy-Item $arq.FullName $alvo -Force
+      Write-Host "Certificado RFB $($arq.Name) atualizado pelo do pacote (vence em $($novo.NotAfter.ToString('dd/MM/yyyy')))."
+    } else {
+      Write-Host "Certificado RFB $($arq.Name) mantido (o da pasta vence em $($atual.NotAfter.ToString('dd/MM/yyyy')), não antes do do pacote)."
+    }
+  }
+}
 
 # ------------------------------------------------------------------ resumo do erro para a tela do instalador
 # Antes a falha só dizia "a configuração final falhou (código 1), veja o log". Agora o catch grava em
@@ -138,6 +173,53 @@ function Read-GlobalDefaults {
     if ($_ -match '^\s*(#|$)') { return }
     if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { "$($Matches[1])=$($Matches[2].TrimEnd())" }
   }
+}
+
+# Atualização: o backend.env já existe e não é recriado; sem isto, um valor global novo ou renovado (ex.:
+# SUPORTE_CONTATO) nunca chegaria nas instalações existentes. Acrescenta/atualiza só as chaves de global-defaults.env;
+# as demais linhas (segredos cifrados, DB_*) ficam como estão. Teste: tools\testar-postinstall-config.ps1.
+function Merge-GlobalDefaults {
+  param([string[]]$Atual, [string[]]$Globais)
+  $linhas = @($Atual | Where-Object { $null -ne $_ })
+  $mudou = $false
+  foreach ($g in $Globais) {
+    $key = $g.Substring(0, $g.IndexOf('='))
+    $idx = -1
+    for ($i = 0; $i -lt $linhas.Count; $i++) { if ($linhas[$i] -like "$key=*") { $idx = $i; break } }
+    if ($idx -lt 0)               { $linhas += $g; $mudou = $true; Write-Host "global-defaults: $key adicionado ao backend.env." }
+    elseif ($linhas[$idx] -ne $g) { $linhas[$idx] = $g; $mudou = $true; Write-Host "global-defaults: $key atualizado no backend.env." }
+  }
+  return @{ Linhas = $linhas; Mudou = $mudou }
+}
+
+# Estado da pasta (item 2 das pendências 1.2.28) — mesma regra de ClassificarInstalacao (codigo-comum.iss):
+#   nova        = sem backend.env;
+#   atualizacao = backend.env e marcador (config\instalacao.json), ou — instalação anterior à 1.2.28, sem marcador —
+#                 o serviço registrado;
+#   incompleta  = backend.env sem marcador e sem serviço (instalação nova que falhou no meio): reaproveita o backend.env.
+# Teste: tools\testar-postinstall-config.ps1.
+function Get-ModoInstalacao {
+  param([bool]$TemBackendEnv, [bool]$TemMarcador, [bool]$TemServico)
+  if (-not $TemBackendEnv) { return 'nova' }
+  if ($TemMarcador -or $TemServico) { return 'atualizacao' }
+  return 'incompleta'
+}
+
+# O instalador manda no install-params.json o modo que mostrou ao usuário (as páginas que pediu). Divergiu do que
+# está no disco: para antes de mexer na configuração.
+function Assert-ModoConfere {
+  param([string]$Modo, [string]$ModoInstalador)
+  if ($ModoInstalador -and $ModoInstalador -ne $Modo) {
+    throw "O instalador tratou esta pasta como '$ModoInstalador', mas o estado dela agora é '$Modo'. A configuração não foi alterada; rode o instalador de novo."
+  }
+}
+
+function Write-MarcadorInstalacao {
+  param([string]$Arquivo, [string]$Modo, [string]$VersaoJson)
+  $versao = 'desconhecida'
+  try { $versao = (Get-Content $VersaoJson -Raw | ConvertFrom-Json).versao } catch { }
+  $json = [ordered]@{ versao = $versao; modo = $Modo; concluidaEm = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($Arquivo, $json, (New-Object Text.UTF8Encoding $false))
 }
 
 function Wait-Port {
@@ -433,13 +515,22 @@ function Write-ServicoConfig {
 }
 
 try {
-  $Fresh = -not (Test-Path $EnvFile)
+  # Estado da pasta (item 2 das pendências 1.2.28): nova, atualização ou incompleta — a mesma regra do instalador
+  # (codigo-comum.iss, ClassificarInstalacao). Só "nova" grava um backend.env novo, e "nova" só existe sem backend.env.
+  $P = $null
+  if (Test-Path $ParamsFile) {
+    $P = Get-Content $ParamsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    Restrict-Acl $ParamsFile   # contém senhas em texto puro até ser apagado no finally
+  }
+  $Modo = Get-ModoInstalacao (Test-Path $EnvFile) (Test-Path $MarcadorFile) ([bool](Get-Service $SvcName -ErrorAction SilentlyContinue))
+  Write-Host "Modo: $Modo (instalador: $(if ($P -and $P.modo) { $P.modo } else { 'não informado' }))"
+  Assert-ModoConfere $Modo $(if ($P) { $P.modo } else { $null })
+  $Fresh = $Modo -eq 'nova'
+  $CriaAdmin = $Modo -ne 'atualizacao'   # nova, ou incompleta (a anterior falhou antes de concluir)
 
   # ------------------------------------------------------------------ instalação nova
   if ($Fresh) {
-    if (-not (Test-Path $ParamsFile)) { throw "Arquivo de parâmetros do instalador não encontrado." }
-    $P = Get-Content $ParamsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    Restrict-Acl $ParamsFile   # contém a senha do banco em texto puro até ser apagado no finally
+    if (-not $P) { throw "Arquivo de parâmetros do instalador não encontrado." }
 
     if ($P.dbMode -eq 'embedded') {
       $script:Etapa = 'Instalação do PostgreSQL embutido e criação do banco'
@@ -500,7 +591,7 @@ try {
     }
 
     $script:Etapa = 'Gravação da configuração (config\backend.env)'
-    $globalLines = @(Read-GlobalDefaults $GlobalsFile)   # LICENSE_PUBLIC_KEY_B64, CERT_SERVIDOR_RFB, ...
+    $globalLines = @(Read-GlobalDefaults $GlobalsFile)   # LICENSE_PUBLIC_KEY_B64, ...
     $envLines = @(
       'NODE_ENV=production',
       'DEPLOYMENT_TYPE=on-premise',
@@ -526,43 +617,56 @@ try {
     $envLines += $globalLines   # públicos/fixos: texto puro, sem Protect-Secret
     if ($dbType -eq 'oracle') { $envLines += "DB_SERVICE_NAME=$(Protect-Secret $dbName)" }
     if ($dbType -eq 'mssql')  { $envLines += 'DB_ENCRYPT=true'; $envLines += 'DB_TRUST_CERT=true' }   # servidores internos costumam ter certificado próprio
+    # Trava final: um backend.env existente NUNCA é sobrescrito (segredos e ENCRYPTION_KEY novos deixariam ilegíveis
+    # o certificado e as senhas já cifrados)
+    if (Test-Path $EnvFile) { throw "config\backend.env já existe e não será recriado (modo $Modo). Nada foi alterado na configuração." }
     Set-Content -Path $EnvFile -Value $envLines -Encoding UTF8
     Restrict-Acl $EnvFile
   }
   # ------------------------------------------------------------------ atualização
   else {
     $script:Etapa = 'Atualização da configuração (config\backend.env)'
-    # backend.env já existe e não é recriado; sem isto, um CERT_SERVIDOR_RFB renovado nunca chegaria
+    # backend.env já existe e não é recriado; sem isto, um valor global renovado nunca chegaria
     # nas instalações existentes. Atualiza/acrescenta só as chaves de global-defaults.env.
-    $current = @(Get-Content $EnvFile -Encoding UTF8)
-    $changed = $false
-    foreach ($g in @(Read-GlobalDefaults $GlobalsFile)) {
-      $key = $g.Substring(0, $g.IndexOf('='))
-      $idx = -1
-      for ($i = 0; $i -lt $current.Count; $i++) { if ($current[$i] -like "$key=*") { $idx = $i; break } }
-      if ($idx -lt 0)                { $current += $g; $changed = $true; Write-Host "global-defaults: $key adicionado ao backend.env." }
-      elseif ($current[$idx] -ne $g) { $current[$idx] = $g; $changed = $true; Write-Host "global-defaults: $key atualizado no backend.env." }
-    }
+    $mescla = Merge-GlobalDefaults @(Get-Content $EnvFile -Encoding UTF8) @(Read-GlobalDefaults $GlobalsFile)
+    $current = $mescla.Linhas
+    $changed = $mescla.Mudou
     # Instalações anteriores não tinham ENCRYPTION_KEY: gera uma vez. O backend recifra o certificado salvo (que
     # estava com a chave derivada do JWT_SECRET) na primeira vez que o usar.
     if (-not ($current | Where-Object { $_ -like 'ENCRYPTION_KEY=*' })) {
       $current += "ENCRYPTION_KEY=$(Protect-Secret (New-HexKey32))"; $changed = $true
       Write-Host 'ENCRYPTION_KEY gerada e adicionada ao backend.env.'
     }
+    # CERT_SERVIDOR_RFB (um certificado só, o da Produção Restrita, usado também em Produção) foi substituído pelos
+    # arquivos de config\rfb (um por ambiente): sai do backend.env para não confundir quem o ler
+    $semCertAntigo = @($current | Where-Object { $_ -notlike 'CERT_SERVIDOR_RFB=*' })
+    if ($semCertAntigo.Count -ne $current.Count) {
+      $current = $semCertAntigo; $changed = $true
+      Write-Host 'CERT_SERVIDOR_RFB removido do backend.env (agora: config\rfb, um certificado por ambiente).'
+    }
     if ($changed) { Set-Content -Path $EnvFile -Value $current -Encoding UTF8 }
   }
+
+  # Certificados de criptografia de lotes da RFB (um por ambiente) em config\rfb — renováveis sem reinstalar
+  $script:Etapa = 'Certificados de criptografia da RFB (config\rfb)'
+  Install-CertificadosRfb
 
   Import-EnvFile $EnvFile
   $HttpPort = [int]$env:PORT
 
-  # ------------------------------------------------------------------ tabelas + Cliente + administrador (só instalação nova)
-  if ($Fresh) {
+  # ------------------------------------------------------------------ tabelas + Cliente + administrador (instalação nova
+  # ou incompleta — nesta, com o banco do backend.env que ficou)
+  if ($CriaAdmin) {
+    if (-not $P) { throw "Arquivo de parâmetros do instalador não encontrado." }
     $script:Etapa = 'Criação das tabelas, da instituição e do administrador'
     Push-Location $BackendDir
     try {
       $env:CLIENTE_NOME = $P.clienteNome; $env:CLIENTE_CNPJ = $P.clienteCnpj
       $env:ADMIN_NOME   = $P.adminNome;   $env:ADMIN_LOGIN  = $P.adminLogin
       $env:ADMIN_EMAIL  = $P.adminEmail;  $env:ADMIN_SENHA  = $P.adminSenha
+      # Banco que já tinha o e-Financeira: o setup grava aqui o aviso (administrador NÃO criado), que o instalador
+      # mostra no fim (item 1 das pendências 1.2.28)
+      $env:SETUP_AVISO_ARQUIVO = Join-Path $LogDir 'install-aviso.txt'
       try {
         $setupArgs = @('dist\scripts\onpremise-setup.js')
         $r = Invoke-Captured $Node $setupArgs
@@ -586,7 +690,7 @@ try {
           }
         }
       }
-      finally { Remove-Item Env:\CLIENTE_NOME, Env:\CLIENTE_CNPJ, Env:\ADMIN_NOME, Env:\ADMIN_LOGIN, Env:\ADMIN_EMAIL, Env:\ADMIN_SENHA -ErrorAction SilentlyContinue }
+      finally { Remove-Item Env:\CLIENTE_NOME, Env:\CLIENTE_CNPJ, Env:\ADMIN_NOME, Env:\ADMIN_LOGIN, Env:\ADMIN_EMAIL, Env:\ADMIN_SENHA, Env:\SETUP_AVISO_ARQUIVO -ErrorAction SilentlyContinue }
     } finally { Pop-Location }
   }
 
@@ -663,7 +767,7 @@ $dep
   Invoke-Checked $svcExe @('start')
 
   # ------------------------------------------------------------------ firewall e atalho
-  if ($Fresh -and $P.firewall) {
+  if ($CriaAdmin -and $P.firewall) {
     Get-NetFirewallRule -DisplayName 'e-Financeira' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName 'e-Financeira' -Direction Inbound -Protocol TCP -LocalPort $HttpPort -Action Allow | Out-Null
   }
@@ -675,6 +779,10 @@ $dep
     throw "O serviço foi iniciado, mas a porta $HttpPort não respondeu. Veja os logs em $LogDir."
   }
   Write-Host "e-Financeira no ar: http://localhost:$HttpPort"
+  # Marcador de instalação concluída (item 2): só aqui, no fim de tudo. Sem ele (e sem o serviço), a próxima execução
+  # do instalador trata a pasta como instalação incompleta. Falhar aqui não desfaz nada: o serviço já está registrado.
+  try { Write-MarcadorInstalacao $MarcadorFile $Modo (Join-Path $BackendDir 'versao.json') }
+  catch { Write-Host "Aviso: não consegui gravar $MarcadorFile ($($_.Exception.Message))." }
   exit 0
 }
 catch {
