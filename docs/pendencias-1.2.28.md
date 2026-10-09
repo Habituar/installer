@@ -119,7 +119,7 @@ Roda `tests/integracao/*.test.ts` com `DB_TYPE=postgres` (o tipo das colunas de 
 
 ## 14. Sobras dos grupos A, D, D2, B e C (seção 9 do levantamento do manual)
 
-- **XML de PP na Importação:** a tela converte o XML de evtMovPP com a extração de OpFin antes de mandar ao servidor (levantamento, item 2). Ler o evtMovPP no servidor, como o OpFin.
+- **XML de PP na Importação — correção completa na 1.2.29:** na 1.2.28 a tela recusa `.xml` na opção Previdência Privada ("Para Previdência Privada, use CSV ou Excel (.xlsx)"), porque converteria os evtMovPP pelo leiaute de OpFin e o servidor recusaria todas as linhas (levantamento, item 2). Na 1.2.29: o servidor ler o evtMovPP (planos, aportes, resgates, portabilidade), como já lê o evtMovOpFin em `cadastro-xml`, e a tela voltar a aceitar o XML de PP.
 - **Configurações → Banco de Dados (banco dedicado):** confirmar se tem efeito no on-premise; se não, tirar da tela (item 6).
 - **Certificado digital:** conferir o CNPJ do certificado com o da empresa declarante antes de transmitir (item 12; cadeia ICP-Brasil e vencimento já conferidos no Grupo A).
 - **Pacote de diagnóstico:** botão na tela (hoje só `GET /api/configuracoes/diagnostico`) (item 14).
