@@ -52,6 +52,8 @@ Source: "deps\postgresql-installer.exe"; DestDir: "{tmp}"; Flags: deleteafterins
 Name: "{group}\e-Financeira"; Filename: "{app}\e-Financeira.url"
 Name: "{group}\Logs do e-Financeira"; Filename: "{app}\logs"
 Name: "{group}\Voltar para a versao anterior (rollback)"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\rollback.ps1"""; WorkingDir: "{app}"; Comment: "Desfaz a ultima atualizacao (exige administrador)"
+; Item 3 (pendencias 1.2.28): o unico administrador esqueceu a senha. Mesmo nome citado na tela de login do on-premise.
+Name: "{group}\Redefinir senha do administrador"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\redefinir-senha-admin.ps1"""; WorkingDir: "{app}"; Comment: "Gera uma senha temporaria para um administrador do e-Financeira (exige administrador)"
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall-services.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveServices"

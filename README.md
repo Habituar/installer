@@ -73,6 +73,7 @@ Se faltar um arquivo e o download falhar, o build para com a mensagem "Não cons
 |---|---|
 | Atualização (rodar o novo setup por cima) | Pede a **confirmação do backup do banco** (obrigatória) e guarda a versão em uso em `previous\`. Depois para o serviço, troca os arquivos e reinicia. O backend aplica as migrations novas ao subir. `config\` e o banco são preservados. Se não conseguir guardar a versão anterior, cancela sem mexer em nada |
 | Rollback (voltar para a versão anterior) | Menu Iniciar → *Voltar para a versão anterior (rollback)*, ou `scripts\rollback.ps1` como Administrador. Desfaz no banco só as migrations que a versão anterior não conhece, restaura `backend\`, `frontend\` e `scripts\` de `previous\`, sobe o serviço e confere o `/health`. A versão desfeita fica em `desfeita-<data>\`, e o log fica em `logs\rollback-*.log` |
+| Administrador esqueceu a senha | Menu Iniciar → *Redefinir senha do administrador*, ou `scripts\redefinir-senha-admin.ps1` como Administrador. Lista os administradores, pede o login e a confirmação (SIM), gera uma senha temporária mostrada **só na tela** (nunca em log), obriga a troca no próximo login, desbloqueia/reativa o usuário, encerra as sessões dele e registra na Auditoria (`servidor:<usuário do Windows>`). Log sem a senha: `logs\redefinir-senha-admin.log`. Teste: `tools\testar-redefinir-senha-admin.ps1` (só em banco de teste) |
 | Desinstalação | Remove o serviço e a regra de firewall. **Mantém** `config\`, `logs\`, `pgdata\` e `pgsql\` |
 
 Pastas no cliente (`C:\Program Files\eFinanceira` por padrão):

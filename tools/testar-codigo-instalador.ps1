@@ -19,6 +19,12 @@ try {
   $p = Start-Process -FilePath (Join-Path $tmp 'testar-codigo-instalador.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', "/saida=$saida", "/aviso=$aviso" -Wait -PassThru
   if (-not (Test-Path $saida)) { throw "O teste não gravou o resultado (código $($p.ExitCode))." }
   $linhas = @(Get-Content $saida -Encoding UTF8 | Where-Object { $_ })
+  # Item 3: atalho do menu Iniciar com o MESMO nome que a tela de login cita (front, ATALHO_REDEFINIR_SENHA_ADMIN)
+  $iss = Get-Content (Join-Path $PSScriptRoot '..\efinanceira.iss') -Raw
+  $atalho = $iss -match '(?m)^Name: "\{group\}\\Redefinir senha do administrador"; Filename: "powershell\.exe"; Parameters: "[^"]*""\{app\}\\scripts\\redefinir-senha-admin\.ps1""'
+  $linhas += $(if ($atalho -and (Test-Path (Join-Path $PSScriptRoot '..\scripts\redefinir-senha-admin.ps1'))) {
+    'ok    atalho "Redefinir senha do administrador" no menu Iniciar aponta para scripts\redefinir-senha-admin.ps1' } else {
+    'FALHA atalho "Redefinir senha do administrador" ausente ou apontando para outro script' })
   $linhas | ForEach-Object { if ($_ -like 'FALHA*') { Write-Host $_ -ForegroundColor Red } else { Write-Host $_ } }
   $falhas = @($linhas | Where-Object { $_ -like 'FALHA*' }).Count
   if (-not $linhas.Count) { throw 'Nenhuma verificação executada.' }
