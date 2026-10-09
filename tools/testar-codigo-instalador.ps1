@@ -13,7 +13,10 @@ try {
   & $iscc /Q "/O$tmp" (Join-Path $PSScriptRoot 'testar-codigo-instalador.iss')
   if ($LASTEXITCODE -ne 0) { throw "ISCC falhou ao compilar o teste (código $LASTEXITCODE)." }
   $saida = Join-Path $tmp 'resultado.txt'
-  $p = Start-Process -FilePath (Join-Path $tmp 'testar-codigo-instalador.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', "/saida=$saida" -Wait -PassThru
+  # install-aviso.txt como o setup (Node) grava: UTF-8 com BOM, CRLF, acentos
+  $aviso = Join-Path $tmp 'install-aviso.txt'
+  [IO.File]::WriteAllText($aviso, "Banco j$([char]0xE1) configurado: o administrador informado N$([char]0xC3)O foi criado.`r`nInstitui$([char]0xE7)$([char]0xE3)o: Teste`r`n", (New-Object Text.UTF8Encoding $true))
+  $p = Start-Process -FilePath (Join-Path $tmp 'testar-codigo-instalador.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', "/saida=$saida", "/aviso=$aviso" -Wait -PassThru
   if (-not (Test-Path $saida)) { throw "O teste não gravou o resultado (código $($p.ExitCode))." }
   $linhas = @(Get-Content $saida -Encoding UTF8 | Where-Object { $_ })
   $linhas | ForEach-Object { if ($_ -like 'FALHA*') { Write-Host $_ -ForegroundColor Red } else { Write-Host $_ } }

@@ -615,6 +615,9 @@ try {
       $env:CLIENTE_NOME = $P.clienteNome; $env:CLIENTE_CNPJ = $P.clienteCnpj
       $env:ADMIN_NOME   = $P.adminNome;   $env:ADMIN_LOGIN  = $P.adminLogin
       $env:ADMIN_EMAIL  = $P.adminEmail;  $env:ADMIN_SENHA  = $P.adminSenha
+      # Banco que já tinha o e-Financeira: o setup grava aqui o aviso (administrador NÃO criado), que o instalador
+      # mostra no fim (item 1 das pendências 1.2.28)
+      $env:SETUP_AVISO_ARQUIVO = Join-Path $LogDir 'install-aviso.txt'
       try {
         $setupArgs = @('dist\scripts\onpremise-setup.js')
         $r = Invoke-Captured $Node $setupArgs
@@ -638,7 +641,7 @@ try {
           }
         }
       }
-      finally { Remove-Item Env:\CLIENTE_NOME, Env:\CLIENTE_CNPJ, Env:\ADMIN_NOME, Env:\ADMIN_LOGIN, Env:\ADMIN_EMAIL, Env:\ADMIN_SENHA -ErrorAction SilentlyContinue }
+      finally { Remove-Item Env:\CLIENTE_NOME, Env:\CLIENTE_CNPJ, Env:\ADMIN_NOME, Env:\ADMIN_LOGIN, Env:\ADMIN_EMAIL, Env:\ADMIN_SENHA, Env:\SETUP_AVISO_ARQUIVO -ErrorAction SilentlyContinue }
     } finally { Pop-Location }
   }
 

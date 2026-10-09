@@ -72,6 +72,7 @@ var
   CnpjEdit: TPasswordEdit;      { ClientePage.Edits[1] — mascara em tempo real }
   FormatandoCnpj: Boolean;      { evita reentrar no OnChange ao reescrever o Text }
   BackupPage: TInputOptionWizardPage; { atualizacao: confirmacao obrigatoria do backup do banco }
+  AvisoInstalacao: String;      { logs\install-aviso.txt: banco ja configurado, administrador nao criado (item 1) }
 
 const
   ColorNeutralBg = $00F5F5F5;   { cinza bem claro: em andamento }
@@ -693,11 +694,8 @@ begin
       Msg := Msg + #13#10 +
         '   (de outros computadores da rede: http://' + GetEnv('COMPUTERNAME') + ':' + Porta + ')';
     Msg := Msg + #13#10#13#10 +
-      'Primeiro acesso (administrador):' + #13#10 +
-      '   Usuario: ' + Trim(AdminPage.Values[1]) + #13#10 +
-      '   E-mail:  ' + Trim(AdminPage.Values[2]) + #13#10 +
-      '   Senha:   a que voce definiu nesta instalacao' + #13#10#13#10 +
-      'Guarde essas informacoes em local seguro. O atalho "e-Financeira" foi criado no menu Iniciar.';
+      BlocoPrimeiroAcesso(Trim(AdminPage.Values[1]), Trim(AdminPage.Values[2]), AvisoInstalacao) + #13#10#13#10 +
+      'O atalho "e-Financeira" foi criado no menu Iniciar.';
   end;
 
   WizardForm.FinishedLabel.AutoSize := False;
@@ -773,14 +771,16 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   RC, ErroAbrir: Integer;
-  ArquivoErro, ArquivoLog: String;
+  ArquivoErro, ArquivoLog, ArquivoAviso: String;
 begin
   if CurStep = ssPostInstall then
   begin
     WriteParams;
     ArquivoErro := ExpandConstant('{app}\logs\install-erro.txt');
     ArquivoLog := ExpandConstant('{app}\logs\install.log');
+    ArquivoAviso := ExpandConstant('{app}\logs\install-aviso.txt');
     DeleteFile(ArquivoErro); { nunca mostrar o erro de uma execucao anterior (ex.: powershell nem chegou a rodar) }
+    DeleteFile(ArquivoAviso); { idem para o aviso de banco ja configurado }
     WizardForm.StatusLabel.Caption := 'Configurando banco de dados e servicos (pode levar alguns minutos)...';
     if (not Exec('powershell.exe',
           '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\postinstall.ps1') + '"',
@@ -791,6 +791,14 @@ begin
       if SuppressibleMsgBox(MensagemFalhaConfiguracao(RC, LerResumoErroInstalacao(ArquivoErro), ArquivoLog),
            mbError, MB_YESNO, IDNO) = IDYES then
         ShellExec('', 'notepad.exe', '"' + ArquivoLog + '"', '', SW_SHOWNORMAL, ewNoWait, ErroAbrir);
+    end
+    else
+    begin
+      { Item 1 (pendencias 1.2.28): o banco ja tinha o e-Financeira configurado - o administrador informado NAO foi
+        criado. Antes isso so aparecia no install.log e a tela final mandava entrar com o usuario descartado. }
+      AvisoInstalacao := LerAvisoInstalacao(ArquivoAviso);
+      if AvisoInstalacao <> '' then
+        SuppressibleMsgBox(AvisoInstalacao, mbInformation, MB_OK, IDOK);
     end;
   end;
 end;

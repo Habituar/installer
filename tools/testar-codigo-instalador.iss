@@ -59,6 +59,14 @@ begin
   Login('john-doe@x.com', 'john-doe@x.com', '', '', False, 'O caractere "-" (posicao 5)');
   Login('', 'j@x.com', '', '', False, 'Preencha o usuario');
 
+  { Item 1: banco ja configurado - a pagina final mostra o aviso, nao o usuario que nao foi criado }
+  Registra(Pos('Usuario: admin', BlocoPrimeiroAcesso('admin', 'a@b.com', '')) > 0, 'sem aviso: pagina final mostra o administrador criado');
+  Registra((BlocoPrimeiroAcesso('admin', 'a@b.com', 'Banco ja configurado: o administrador informado NAO foi criado.') =
+    'Banco ja configurado: o administrador informado NAO foi criado.'), 'com aviso: pagina final mostra o aviso no lugar do usuario descartado');
+  Registra(LerAvisoInstalacao(ExpandConstant('{param:aviso|}')) = 'Banco já configurado: o administrador informado NÃO foi criado.' + #13#10 + 'Instituição: Teste',
+    'install-aviso.txt (UTF-8 com BOM, acentos) lido como o setup gravou');
+  Registra(LerAvisoInstalacao(ExpandConstant('{param:aviso|}') + '.nao-existe') = '', 'sem install-aviso.txt: sem aviso');
+
   SaveStringsToUTF8File(ExpandConstant('{param:saida|}'), Saida, False);
   Result := False;
 end;

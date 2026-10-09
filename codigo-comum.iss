@@ -76,6 +76,28 @@ begin
     Result := Trim(Utf8Decode(Bruto));
 end;
 
+{ Aviso de "banco ja configurado" gravado pelo setup (onpremise-setup.ts) em logs\install-aviso.txt, UTF-8 com BOM:
+  o banco ja tinha uma instalacao do e-Financeira e o administrador informado NAO foi criado. Vazio = sem aviso. }
+function LerAvisoInstalacao(const Arquivo: String): String;
+begin
+  Result := LerResumoErroInstalacao(Arquivo);
+end;
+
+{ Bloco "primeiro acesso" da pagina final da instalacao nova. Com o aviso de banco ja configurado, mostra o aviso no
+  lugar do usuario informado (que nao foi criado) - antes a tela dizia para entrar com ele. }
+function BlocoPrimeiroAcesso(const Login, Email, Aviso: String): String;
+begin
+  if Aviso <> '' then
+    Result := Aviso
+  else
+    Result :=
+      'Primeiro acesso (administrador):' + #13#10 +
+      '   Usuario: ' + Login + #13#10 +
+      '   E-mail:  ' + Email + #13#10 +
+      '   Senha:   a que voce definiu nesta instalacao' + #13#10#13#10 +
+      'Guarde essas informacoes em local seguro.';
+end;
+
 { Mensagem da tela de falha da configuracao final: o erro real (quando houver) e onde esta o log completo. }
 function MensagemFalhaConfiguracao(Codigo: Integer; const Resumo, ArquivoLog: String): String;
 begin
